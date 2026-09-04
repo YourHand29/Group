@@ -45,6 +45,80 @@ Group/
    └─ tests/test_graph.py        # Backbone smoke tests
 ```
 
+## AWS authentication for the team
+
+### Team decision: Option 2 — named AWS credentials profile
+
+For this shared four-person repository, use Option 2. Each teammate keeps their own AWS credentials in a local `paper-atlas` profile, while the code uses only the profile name. This avoids secrets in Git, avoids credentials in source code, and avoids having to paste environment variables into every terminal.
+
+The repository does not contain AWS credentials and should not contain them. Each developer uses their own AWS CLI profile. The recommended setup is AWS IAM Identity Center (SSO), because the AWS CLI stores the profile configuration and temporary session cache on the developer's machine rather than in Git.
+
+One developer setup:
+
+```powershell
+cd backend
+python -m pip install -e ".[dev]"
+Copy-Item .env.example .env
+.\scripts\aws-login.ps1 -ProfileName paper-atlas
+.\scripts\aws-check.ps1
+```
+
+During the first login, AWS CLI asks for the organization's SSO start URL, SSO region, AWS account, and role. Put only non-secret runtime choices in `backend/.env`:
+
+```text
+PAPER_ATLAS_AWS_PROFILE=paper-atlas
+PAPER_ATLAS_AWS_REGION=ap-southeast-1
+PAPER_ATLAS_BEDROCK_MODEL_ID=
+```
+
+Change the region and profile to match the team's AWS setup. Do not put `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, session tokens, private keys, or passwords in `.env`, source code, or Git. `backend/.env` is ignored locally, while `backend/.env.example` is the safe template that can be committed.
+
+The AWS session is cached by AWS CLI, so the backend can reuse it across restarts. SSO sessions expire by design; a user may occasionally need to run `.\scripts\aws-login.ps1 -ProfileName paper-atlas` again. No application can safely guarantee permanent login without using a long-lived secret or a managed IAM role. For deployed environments, use an IAM role attached to the compute service instead of sharing a developer profile.
+
+The `paper-atlas-aws-check` command calls AWS STS only to confirm the active identity and never prints credentials. AWS connectivity is prepared for the future Bedrock model adapter; the current model remains `demo` until that adapter is implemented.
+
+### If the hackathon gives you access key credentials
+
+If the organizers provide an **AWS access key ID**, **AWS secret access key**, and **AWS session token**, they are temporary credentials. All three values are required together, and they expire at the time specified by the organizers. They are different from an SSO login.
+
+On Windows, AWS CLI stores them in:
+
+```text
+C:\Users\<your-user>\.aws\credentials
+```
+
+The safest setup is to create a named profile with the AWS CLI. Do this in your own terminal and never paste the values into Git:
+
+```powershell
+aws configure --profile paper-atlas
+```
+
+Enter the access key ID and secret access key when prompted. Then add the session token to the same profile:
+
+```text
+[paper-atlas]
+aws_access_key_id = YOUR_ACCESS_KEY_ID
+aws_secret_access_key = YOUR_SECRET_ACCESS_KEY
+aws_session_token = YOUR_SESSION_TOKEN
+```
+
+Do not add quotation marks. The credentials file is outside the repository and should remain private. In `backend/.env`, select the profile:
+
+```text
+PAPER_ATLAS_AWS_PROFILE=paper-atlas
+PAPER_ATLAS_AWS_REGION=the-region-provided-by-the-organizers
+```
+
+Verify the profile without exposing the secret values:
+
+```powershell
+aws sts get-caller-identity --profile paper-atlas
+cd backend
+.\scripts\aws-check.ps1
+```
+
+If the organizers provide long-lived access keys instead, omit `aws_session_token`. If they provide temporary credentials, do not omit it. When temporary credentials expire, replace the three values or run the organizers' refresh procedure. Never commit `C:\Users\<your-user>\.aws\credentials`, `backend/.env`, or any credential values.
+
 ## Architecture
 
 ```text

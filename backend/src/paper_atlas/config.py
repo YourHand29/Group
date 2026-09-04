@@ -13,6 +13,9 @@ class Settings(BaseModel):
     max_document_chars: int = Field(default=120_000, ge=1_000, le=2_000_000)
     max_chunk_chars: int = Field(default=4_000, ge=500, le=20_000)
     frontend_origin: str = "http://localhost:3000"
+    aws_profile: str | None = None
+    aws_region: str = "ap-southeast-1"
+    bedrock_model_id: str = ""
 
 
 @lru_cache(maxsize=1)
@@ -23,4 +26,7 @@ def get_settings() -> Settings:
         max_document_chars=int(os.getenv("PAPER_ATLAS_MAX_DOCUMENT_CHARS", "120000")),
         max_chunk_chars=int(os.getenv("PAPER_ATLAS_MAX_CHUNK_CHARS", "4000")),
         frontend_origin=os.getenv("PAPER_ATLAS_FRONTEND_ORIGIN", "http://localhost:3000"),
+        aws_profile=os.getenv("PAPER_ATLAS_AWS_PROFILE", "paper-atlas") or None,
+        aws_region=os.getenv("PAPER_ATLAS_AWS_REGION", "ap-southeast-1"),
+        bedrock_model_id=os.getenv("PAPER_ATLAS_BEDROCK_MODEL_ID", ""),
     )
