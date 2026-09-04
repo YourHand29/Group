@@ -6,7 +6,7 @@ from typing import Protocol
 
 import sys
 import os
-import pypdf import PdfReader
+from pypdf import PdfReader
 from langgraph.graph import MessagesState, StateGraph, START, END
 from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
 from typing import Protocol, Any
@@ -61,12 +61,7 @@ class ResearchModel(Protocol):
             for page in document.pages:
                 text += page.extract_text() + "\n"                
         return extract_sections(text)
-            
-            
-        
-        #Regex to tell what section of paper machine is looking
-         
-        
+
 
     def summarise(self, analysis: PaperAnalysis) -> tuple[str, int]:
         ...
