@@ -17,6 +17,7 @@ class ResearchState(TypedDict, total=False):
     paper: PaperAnalysis
     concepts: list[Concept]
     evidence: list[Evidence]
+    concept_explanations: list[dict[str, object]]
     query_matches: list[str]
     relationships: list[Relationship]
     thesis: str

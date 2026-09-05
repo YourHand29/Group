@@ -1,11 +1,28 @@
 'use client';
 
-import { ChangeEvent, useMemo, useState } from 'react';
-import type { MapNode, PaperMap, PaperSummary } from '../lib/research-schema';
+import { ChangeEvent, useEffect, useMemo, useRef, useState } from 'react';
+import cytoscape from 'cytoscape';
+import type { ConceptExplanation, MapNode, PaperMap, PaperSummary } from '../lib/research-schema';
 import { demoMap, demoPapers } from '../lib/research-orchestrator';
 
-type ViewMode = 'map' | 'evidence' | 'notes';
+type ViewMode = 'map' | 'evidence' | 'notes' | 'concepts';
 const BACKEND_URL = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:8080';
+
+type BackendConcept = { id: string; label: string; kind: MapNode['kind']; description: string; confidence: number };
+type BackendConceptExplanation = {
+  concept_id: string;
+  term: string;
+  kind: MapNode['kind'];
+  definition: string;
+  use_in_paper: string;
+  supporting_evidence: Array<{ evidence_id: string; claim: string; excerpt: string; source_location: string | null; confidence: number }>;
+  support_status: ConceptExplanation['supportStatus'];
+  reliability: ConceptExplanation['reliability'];
+  simple_explanation: string;
+  paper_context: string;
+  evidence_ids: string[];
+  confidence: number;
+};
 
 type BackendAnalysisResponse = {
   run_id: string;
@@ -14,7 +31,8 @@ type BackendAnalysisResponse = {
   thesis: string;
   summary: string;
   relevance: number;
-  concepts: Array<{ id: string; label: string; kind: MapNode['kind']; description: string; confidence: number }>;
+  concepts: BackendConcept[];
+  concept_explanations?: BackendConceptExplanation[];
   relationships: Array<{ target_id: string; explanation: string; confidence: number }>;
   warnings: string[];
   trace: string[];
@@ -22,30 +40,287 @@ type BackendAnalysisResponse = {
   query_matches: string[];
 };
 
-const nodePositions: Record<string, string> = {
-  thesis: 'node-thesis',
-  method: 'node-method',
-  finding: 'node-finding',
-  experiment: 'node-experiment',
-  metric: 'node-metric',
+const viewLabels: Record<ViewMode, string> = {
+  map: 'Map',
+  evidence: 'Evidence',
+  notes: 'Notes',
+  concepts: 'Concepts',
 };
+
+const conceptKindUsage: Record<MapNode['kind'], string> = {
+  thesis: 'The paper uses this as its central claim or proposed answer.',
+  method: 'The paper uses this as its approach for addressing the research problem.',
+  finding: 'The paper uses this to report or interpret an observed result.',
+  experiment: 'The paper uses this as part of the procedure for evaluating its proposal.',
+  metric: 'The paper uses this measurement to assess the quality or effect of its approach.',
+};
+
+function fallbackExplanation(concept: BackendConcept): ConceptExplanation {
+  return {
+    conceptId: concept.id,
+    term: concept.label,
+    kind: concept.kind,
+    definition: concept.description,
+    useInPaper: conceptKindUsage[concept.kind],
+    supportingEvidence: [],
+    supportStatus: 'unsupported',
+    reliability: {
+      score: 0,
+      label: 'low',
+      rationale: 'No evidence-grounded explanation was returned by the analysis service.',
+      limitations: ['Verify this concept against the paper or cited literature.'],
+    },
+    simpleExplanation: concept.description,
+    paperContext: 'No supporting evidence was extracted for this concept.',
+    evidenceIds: [],
+    confidence: 0,
+  };
+}
+
+function toConceptExplanation(explanation: BackendConceptExplanation): ConceptExplanation {
+  return {
+    conceptId: explanation.concept_id,
+    term: explanation.term,
+    kind: explanation.kind,
+    definition: explanation.definition,
+    useInPaper: explanation.use_in_paper,
+    supportingEvidence: explanation.supporting_evidence.map((evidence) => ({
+      evidenceId: evidence.evidence_id,
+      claim: evidence.claim,
+      excerpt: evidence.excerpt,
+      sourceLocation: evidence.source_location,
+      confidence: evidence.confidence,
+    })),
+    supportStatus: explanation.support_status,
+    reliability: explanation.reliability,
+    simpleExplanation: explanation.simple_explanation,
+    paperContext: explanation.paper_context,
+    evidenceIds: explanation.evidence_ids,
+    confidence: explanation.confidence,
+  };
+}
 
 function PaperIcon({ tone = 'default' }: { tone?: 'default' | 'mint' | 'coral' }) {
   return <span aria-hidden="true" className={`paper-icon paper-icon-${tone}`} />;
 }
 
-function MapNodeCard({ node, selected, onSelect }: { node: MapNode; selected: boolean; onSelect: () => void }) {
+const graphRelationships = [
+  { id: 'thesis-method', source: 'thesis', target: 'method', label: 'uses' },
+  { id: 'thesis-finding', source: 'thesis', target: 'finding', label: 'leads to' },
+  { id: 'thesis-experiment', source: 'thesis', target: 'experiment', label: 'tested by' },
+  { id: 'thesis-metric', source: 'thesis', target: 'metric', label: 'measured by' },
+];
+
+function CytoscapeMap({ nodes, selectedNode, onSelect }: { nodes: MapNode[]; selectedNode: string; onSelect: (nodeId: string) => void }) {
+  const containerRef = useRef<HTMLDivElement>(null);
+  const cyRef = useRef<cytoscape.Core | null>(null);
+  const onSelectRef = useRef(onSelect);
+
+  useEffect(() => {
+    onSelectRef.current = onSelect;
+  }, [onSelect]);
+
+  useEffect(() => {
+    if (!containerRef.current || !nodes.length) return;
+
+    const graphWidth = containerRef.current.clientWidth;
+    const graphHeight = containerRef.current.clientHeight;
+    const graphPositions: Record<string, { x: number; y: number }> = {
+      thesis: { x: graphWidth * 0.5, y: graphHeight * 0.5 },
+      method: { x: graphWidth * 0.2, y: graphHeight * 0.23 },
+      finding: { x: graphWidth * 0.8, y: graphHeight * 0.23 },
+      experiment: { x: graphWidth * 0.25, y: graphHeight * 0.77 },
+      metric: { x: graphWidth * 0.75, y: graphHeight * 0.77 },
+    };
+    const nodeIds = new Set(nodes.map((node) => node.id));
+    const cy = cytoscape({
+      container: containerRef.current,
+      elements: [
+        ...nodes.map((node, index) => ({
+          data: { id: node.id, label: node.label, kind: node.kind, detail: node.detail },
+          position: graphPositions[node.id] ?? {
+            x: graphWidth * 0.5 + ((index % 3) - 1) * 100,
+            y: graphHeight * 0.5 + (Math.floor(index / 3) - 1) * 90,
+          },
+        })),
+        ...graphRelationships
+          .filter((relationship) => nodeIds.has(relationship.source) && nodeIds.has(relationship.target))
+          .map((relationship) => ({ data: relationship })),
+      ],
+      style: [
+        {
+          selector: 'node',
+          style: {
+            'background-color': '#ffffff',
+            'border-color': '#d7e5e8',
+            'border-width': 1,
+            'color': '#192b4e',
+            'font-family': 'DM Sans',
+            'font-size': 13,
+            'font-weight': 600,
+            height: 76,
+            label: 'data(label)',
+            padding: 8,
+            shape: 'roundrectangle',
+            'text-halign': 'center',
+            'text-max-width': 130,
+            'text-valign': 'center',
+            'text-wrap': 'wrap',
+            width: 152,
+          },
+        },
+        {
+          selector: 'node[kind = "thesis"]',
+          style: {
+            'background-color': '#effbf8',
+            'border-color': '#8bd5c8',
+            'border-width': 2,
+            'font-size': 15,
+            height: 96,
+            width: 184,
+          },
+        },
+        {
+          selector: 'node:selected',
+          style: {
+            'border-color': '#43c4ad',
+            'border-width': 3,
+            'overlay-color': '#43c4ad',
+            'overlay-opacity': 0.08,
+            'overlay-padding': 6,
+          },
+        },
+        {
+          selector: 'edge',
+          style: {
+            'curve-style': 'bezier',
+            'font-family': 'DM Mono',
+            'font-size': 9,
+            'line-color': '#a9dcd4',
+            label: 'data(label)',
+            'target-arrow-color': '#79c8bc',
+            'target-arrow-shape': 'triangle',
+            'text-background-color': '#ffffff',
+            'text-background-opacity': 0.9,
+            'text-background-padding': 3,
+            color: '#6e9c99',
+            'text-rotation': 'autorotate',
+            width: 2,
+          },
+        },
+      ],
+      maxZoom: 1.8,
+      minZoom: 0.45,
+    });
+
+    cyRef.current = cy;
+    cy.on('tap', 'node', (event) => onSelectRef.current(event.target.id()));
+    const layout = cy.layout({
+      name: 'preset',
+      animate: false,
+      fit: true,
+      padding: 30,
+    });
+    const fitGraph = () => {
+      cy.resize();
+      cy.fit(cy.elements(), 30);
+    };
+    layout.on('layoutstop', fitGraph);
+    layout.run();
+    fitGraph();
+    const resizeObserver = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(fitGraph);
+    resizeObserver?.observe(containerRef.current);
+
+    return () => {
+      resizeObserver?.disconnect();
+      cy.destroy();
+      cyRef.current = null;
+    };
+  }, [nodes]);
+
+  useEffect(() => {
+    const cy = cyRef.current;
+    if (!cy) return;
+    cy.nodes().unselect();
+    const selected = cy.getElementById(selectedNode);
+    if (selected.length) selected.select();
+  }, [selectedNode]);
+
   return (
-    <button
-      type="button"
-      className={`map-node ${nodePositions[node.id]} ${selected ? 'map-node-selected' : ''}`}
-      onClick={onSelect}
-      aria-pressed={selected}
-    >
-      <span className="map-node-kicker">{node.kind}</span>
-      <strong>{node.label}</strong>
-      <span className="map-node-detail">{node.detail}</span>
-    </button>
+    <div className="graph-scroll">
+      <div ref={containerRef} className="cytoscape-graph" role="application" aria-label="Interactive research concept graph">
+        <span className="graph-caption">Drag nodes · scroll to zoom · click to inspect</span>
+      </div>
+    </div>
+  );
+}
+
+function ConceptExplanationCard({ explanation, expanded, onToggle }: { explanation: ConceptExplanation; expanded: boolean; onToggle: () => void }) {
+  const evidenceLabel = explanation.supportingEvidence.length === 1 ? '1 linked evidence item' : `${explanation.supportingEvidence.length} linked evidence items`;
+
+  return (
+    <article className={`concept-card ${expanded ? 'concept-card-expanded' : ''}`}>
+      <button type="button" className="concept-card-trigger" onClick={onToggle} aria-expanded={expanded}>
+        <span className="concept-card-head">
+          <span className="concept-card-kind">{explanation.kind} · {explanation.reliability.label} support</span>
+          <span className={`concept-status concept-status-${explanation.supportStatus}`}>{explanation.supportStatus}</span>
+        </span>
+        <strong>{explanation.term}</strong>
+        <span className="concept-card-definition">{explanation.definition}</span>
+        <span className="concept-card-toggle">{expanded ? 'Hide explanation' : evidenceLabel}<span aria-hidden="true">{expanded ? '⌃' : '⌄'}</span></span>
+      </button>
+
+      {expanded && (
+        <div className="concept-card-details">
+          <div className="concept-detail-block">
+            <span className="concept-detail-label">In this paper</span>
+            <p>{explanation.useInPaper}</p>
+          </div>
+          <div className="concept-detail-block">
+            <span className="concept-detail-label">Plain-language read</span>
+            <p>{explanation.simpleExplanation}</p>
+          </div>
+          <div className="concept-reliability">
+            <div className="concept-reliability-row"><span>Evidence reliability</span><strong>{Math.round(explanation.reliability.score * 100)}% · {explanation.reliability.label}</strong></div>
+            <div className="concept-reliability-track"><span style={{ width: `${explanation.reliability.score * 100}%` }} /></div>
+            <p>{explanation.reliability.rationale}</p>
+          </div>
+          <div className="concept-detail-block">
+            <span className="concept-detail-label">Linked evidence</span>
+            {explanation.supportingEvidence.length ? (
+              <ul className="concept-evidence-list">
+                {explanation.supportingEvidence.map((evidence) => (
+                  <li key={evidence.evidenceId}>
+                    <strong>{evidence.claim}</strong>
+                    <span>“{evidence.excerpt}”{evidence.sourceLocation ? ` · ${evidence.sourceLocation}` : ''}</span>
+                  </li>
+                ))}
+              </ul>
+            ) : <p>{explanation.paperContext}</p>}
+          </div>
+          {explanation.reliability.limitations.length > 0 && (
+            <div className="concept-limitations"><span className="concept-detail-label">Read with care</span><p>{explanation.reliability.limitations[0]}</p></div>
+          )}
+        </div>
+      )}
+    </article>
+  );
+}
+
+function ConceptsView({ explanations, expandedConceptId, onToggle }: { explanations: ConceptExplanation[]; expandedConceptId: string | null; onToggle: (conceptId: string) => void }) {
+  return (
+    <div className="concepts-view">
+      <div className="concepts-view-intro">
+        <div><span className="concepts-view-label">EXPLAIN CONCEPT</span><h3>What does the paper mean?</h3></div>
+        <span>{explanations.length} identified concepts</span>
+      </div>
+      <p className="concepts-view-copy">Select a concept to see its role in the paper, how strongly the evidence supports it, and where to verify it.</p>
+      <div className="concepts-grid" role="list" aria-label="Identified concepts">
+        {explanations.map((explanation) => (
+          <ConceptExplanationCard key={explanation.conceptId} explanation={explanation} expanded={expandedConceptId === explanation.conceptId} onToggle={() => onToggle(explanation.conceptId)} />
+        ))}
+      </div>
+    </div>
   );
 }
 
@@ -67,13 +342,13 @@ function PaperCard({ paper, active, onClick }: { paper: PaperSummary; active: bo
 export default function Home() {
   const [paperInput, setPaperInput] = useState('https://arxiv.org/abs/1706.03762');
   const [fileName, setFileName] = useState('');
-  const [fileText, setFileText] = useState('');
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [map, setMap] = useState<PaperMap>(demoMap);
   const [papers, setPapers] = useState<PaperSummary[]>(demoPapers);
   const [selectedNode, setSelectedNode] = useState('thesis');
   const [activePaper, setActivePaper] = useState('paper-01');
   const [viewMode, setViewMode] = useState<ViewMode>('map');
+  const [expandedConceptId, setExpandedConceptId] = useState<string | null>(null);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [status, setStatus] = useState('Ready to map a new paper');
   const [relationshipSummary, setRelationshipSummary] = useState('Paper 01 and Paper 02 converge on efficient context mixing.');
@@ -82,6 +357,11 @@ export default function Home() {
   const selectedNodeData = useMemo(
     () => map.nodes.find((node) => node.id === selectedNode) ?? map.nodes[0],
     [map.nodes, selectedNode],
+  );
+
+  const evidenceCount = useMemo(
+    () => new Set(map.explanations.flatMap((explanation) => explanation.evidenceIds)).size,
+    [map.explanations],
   );
 
   const handleAnalyze = async () => {
@@ -127,6 +407,9 @@ export default function Home() {
         summary: result.summary,
         relevance: result.relevance,
         nodes: result.concepts.map((concept) => ({ id: concept.id, kind: concept.kind, label: concept.label, detail: concept.description })),
+        explanations: result.concept_explanations?.length
+          ? result.concept_explanations.map(toConceptExplanation)
+          : result.concepts.map(fallbackExplanation),
       };
       const nextPaper: PaperSummary = {
         id: result.run_id,
@@ -140,7 +423,8 @@ export default function Home() {
       setMap(nextMap);
       setPapers((current) => [nextPaper, ...current.filter((paper) => paper.id !== nextPaper.id)]);
       setActivePaper(nextPaper.id);
-      setSelectedNode('thesis');
+      setSelectedNode(result.concepts[0]?.id ?? 'thesis');
+      setExpandedConceptId(null);
       setRelationshipCount(result.relationships.length);
       setRelationshipSummary(result.relationships[0]?.explanation || 'No strong overlap found yet. Add another paper to discover a connection.');
       const queryStatus = result.query
@@ -156,12 +440,11 @@ export default function Home() {
     }
   };
 
-  const handleFile = async (event: ChangeEvent<HTMLInputElement>) => {
+  const handleFile = (event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     if (!file) return;
     setFileName(file.name);
     setSelectedFile(file);
-    setFileText(file.type === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf') ? '' : await file.text());
     setStatus(`${file.name} is ready to analyze`);
   };
 
@@ -220,9 +503,9 @@ export default function Home() {
           <div className="signal-grid">
             <section className="map-card" aria-label="Research concept map">
               <div className="map-card-head"><div><span className="card-eyebrow">RESPONSE <span>02</span></span><h2>Concept map</h2></div><div className="map-head-actions"><span className="confidence-pill"><i /> {map.relevance}% relevance</span><button type="button" className="small-icon-button" aria-label="More map options">···</button></div></div>
-              <div className="map-toolbar"><div className="view-tabs" role="tablist" aria-label="Map views">{(['map', 'evidence', 'notes'] as ViewMode[]).map((view) => <button key={view} type="button" role="tab" aria-selected={viewMode === view} className={viewMode === view ? 'view-tab-active' : ''} onClick={() => setViewMode(view)}>{view === 'map' ? 'Map' : view === 'evidence' ? 'Evidence' : 'Notes'}</button>)}</div><span className="map-toolbar-label"><span className="legend-dot legend-dot-teal" /> Core idea <span className="legend-dot legend-dot-coral" /> Signal</span></div>
-              {viewMode === 'map' ? <div className="graph-scroll"><div className="graph-canvas"><div className="graph-grid" /><div className="graph-line graph-line-thesis-method" /><div className="graph-line graph-line-thesis-finding" /><div className="graph-line graph-line-thesis-experiment" /><div className="graph-line graph-line-thesis-metric" /><div className="association-link"><span>↔ related across 2 papers</span></div>{map.nodes.map((node) => <MapNodeCard key={node.id} node={node} selected={selectedNode === node.id} onSelect={() => setSelectedNode(node.id)} />)}<span className="graph-caption">Click a node to inspect the paper’s logic</span></div></div> : <div className="alternate-view"><span className="alternate-icon">{viewMode === 'evidence' ? '◒' : '✦'}</span><h3>{viewMode === 'evidence' ? 'Evidence is clustered around one claim' : 'Notes layer coming into focus'}</h3><p>{viewMode === 'evidence' ? 'The strongest support is the 41% reduction in training cost across three benchmark datasets.' : 'Save your reactions beside any concept as you compare papers.'}</p><button type="button" className="secondary-button" onClick={() => setViewMode('map')}>Back to map</button></div>}
-              <div className="map-card-foot"><span><b>5</b> concepts</span><span><b>4</b> relationships</span><span><b>3</b> evidence signals</span><span className="map-updated">Updated just now <i /></span></div>
+              <div className="map-toolbar"><div className="view-tabs" role="tablist" aria-label="Map views">{(['map', 'evidence', 'notes', 'concepts'] as ViewMode[]).map((view) => <button key={view} type="button" role="tab" aria-selected={viewMode === view} className={viewMode === view ? 'view-tab-active' : ''} onClick={() => setViewMode(view)}>{viewLabels[view]}</button>)}</div><span className="map-toolbar-label"><span className="legend-dot legend-dot-teal" /> Core idea <span className="legend-dot legend-dot-coral" /> Signal</span></div>
+              {viewMode === 'map' ? <CytoscapeMap nodes={map.nodes} selectedNode={selectedNode} onSelect={setSelectedNode} /> : viewMode === 'concepts' ? <ConceptsView explanations={map.explanations} expandedConceptId={expandedConceptId} onToggle={(conceptId) => { setSelectedNode(conceptId); setExpandedConceptId((current) => current === conceptId ? null : conceptId); }} /> : <div className="alternate-view"><span className="alternate-icon">{viewMode === 'evidence' ? '◒' : '✦'}</span><h3>{viewMode === 'evidence' ? 'Evidence is clustered around one claim' : 'Notes layer coming into focus'}</h3><p>{viewMode === 'evidence' ? 'The strongest support is the 41% reduction in training cost across three benchmark datasets.' : 'Save your reactions beside any concept as you compare papers.'}</p><button type="button" className="secondary-button" onClick={() => setViewMode('map')}>Back to map</button></div>}
+              <div className="map-card-foot"><span><b>{map.nodes.length}</b> concepts</span><span><b>{relationshipCount}</b> relationships</span><span><b>{evidenceCount}</b> evidence signals</span><span className="map-updated">Updated just now <i /></span></div>
             </section>
 
             <aside className="insight-column">

@@ -11,6 +11,7 @@ from .nodes import (
     compare_papers,
     default_model,
     extract_structure,
+    explain_concept_nodes,
     fail_workflow,
     ingest_document,
     route_after_ingestion,
@@ -33,6 +34,7 @@ def build_graph(model: ResearchModel | None = None, settings: Settings | None = 
     builder.add_node("ingest_document", lambda state: ingest_document(state, settings))
     builder.add_node("extract_structure", lambda state: extract_structure(state, model))
     builder.add_node("validate_output", validate_output)
+    builder.add_node("explain_concepts", explain_concept_nodes)
     builder.add_node("summarise_paper", lambda state: summarise_paper(state, model))
     builder.add_node("compare_papers", lambda state: compare_papers(state, model))
     builder.add_node("fail", fail_workflow)
@@ -42,6 +44,7 @@ def build_graph(model: ResearchModel | None = None, settings: Settings | None = 
     builder.add_conditional_edges("ingest_document", route_after_ingestion)
     builder.add_edge("extract_structure", "validate_output")
     builder.add_conditional_edges("validate_output", route_after_validation)
+    builder.add_edge("explain_concepts", "summarise_paper")
     builder.add_edge("summarise_paper", "compare_papers")
     builder.add_edge("compare_papers", END)
     builder.add_edge("fail", END)
@@ -83,6 +86,7 @@ def response_from_state(state: ResearchState) -> AnalysisResponse:
         summary=state.get("summary", analysis.plain_language_summary),
         relevance=state.get("relevance", analysis.relevance),
         concepts=state.get("concepts", analysis.concepts),
+        concept_explanations=state.get("concept_explanations", []),
         evidence=state.get("evidence", analysis.evidence),
         relationships=state.get("relationships", []),
         warnings=state.get("warnings", []) + state.get("errors", []),

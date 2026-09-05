@@ -89,6 +89,7 @@ class AnalysisResponse(BaseModel):
     summary: str = ""
     relevance: int = Field(default=0, ge=0, le=100)
     concepts: list[Concept] = Field(default_factory=list)
+    concept_explanations: list[dict[str, object]] = Field(default_factory=list)
     evidence: list[Evidence] = Field(default_factory=list)
     relationships: list[Relationship] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)

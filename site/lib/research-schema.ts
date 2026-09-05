@@ -7,11 +7,44 @@ export type MapNode = {
   detail: string;
 };
 
+export type ConceptSupportStatus = 'direct' | 'contextual' | 'partial' | 'unsupported';
+
+export type EvidenceSupport = {
+  evidenceId: string;
+  claim: string;
+  excerpt: string;
+  sourceLocation: string | null;
+  confidence: number;
+};
+
+export type ReliabilityAssessment = {
+  score: number;
+  label: 'high' | 'moderate' | 'low';
+  rationale: string;
+  limitations: string[];
+};
+
+export type ConceptExplanation = {
+  conceptId: string;
+  term: string;
+  kind: NodeKind;
+  definition: string;
+  useInPaper: string;
+  supportingEvidence: EvidenceSupport[];
+  supportStatus: ConceptSupportStatus;
+  reliability: ReliabilityAssessment;
+  simpleExplanation: string;
+  paperContext: string;
+  evidenceIds: string[];
+  confidence: number;
+};
+
 export type PaperMap = {
   title: string;
   summary: string;
   relevance: number;
   nodes: MapNode[];
+  explanations: ConceptExplanation[];
 };
 
 export type PaperSummary = {

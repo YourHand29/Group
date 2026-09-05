@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from urllib.parse import urlparse
 
+from .agents import explain_concepts
 from .config import Settings
 from .model import DemoResearchModel, ResearchModel, search_text
 from .schemas import PaperAnalysis
@@ -73,6 +74,17 @@ def validate_output(state: ResearchState) -> dict:
         }
 
 
+def explain_concept_nodes(state: ResearchState) -> dict:
+    """Turn extracted concepts into evidence-grounded UI explanations."""
+
+    explanations = explain_concepts(state["concepts"], state["evidence"])
+    return {
+        "concept_explanations": [explanation.model_dump() for explanation in explanations],
+        "status": "explained",
+        "trace": [f"Generated {len(explanations)} evidence-grounded concept explanations"],
+    }
+
+
 def summarise_paper(state: ResearchState, model: ResearchModel) -> dict:
     summary, relevance = model.summarise(state["paper"])
     return {"summary": summary, "relevance": relevance, "status": "summarised", "trace": ["Summary and relevance signal generated"]}
@@ -97,7 +109,7 @@ def route_after_ingestion(state: ResearchState) -> str:
 
 def route_after_validation(state: ResearchState) -> str:
     if not state.get("errors"):
-        return "summarise_paper"
+        return "explain_concepts"
     if state.get("retry_count", 0) <= state.get("max_retries", 0):
         return "extract_structure"
     return "fail"

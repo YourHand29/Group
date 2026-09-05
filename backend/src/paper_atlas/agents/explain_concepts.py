@@ -10,7 +10,7 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
-from ..schemas import Concept, Evidence
+from ..schemas import Concept, ConceptKind, Evidence
 
 
 class ConceptExplanation(BaseModel):
@@ -18,6 +18,7 @@ class ConceptExplanation(BaseModel):
 
     concept_id: str = Field(min_length=1)
     term: str = Field(min_length=1)
+    kind: ConceptKind
     definition: str = Field(min_length=1)
     use_in_paper: str = Field(min_length=1)
     supporting_evidence: list["EvidenceSupport"] = Field(default_factory=list)
@@ -131,6 +132,7 @@ def explain_concepts(concepts: list[Concept], evidence: list[Evidence]) -> list[
             ConceptExplanation(
                 concept_id=concept.id,
                 term=concept.label,
+                kind=concept.kind,
                 definition=concept.description,
                 use_in_paper=use_in_paper,
                 supporting_evidence=[
