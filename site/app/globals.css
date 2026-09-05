@@ -156,6 +156,7 @@ button { color: inherit; cursor: pointer; }
 .concept-status-contextual, .concept-status-partial { background: #fff4e5; color: #b67526; }
 .concept-status-unsupported { background: #f2f3f5; color: #8b96a2; }
 .concept-card-trigger > strong { display: block; margin-top: 13px; overflow: hidden; color: var(--navy); font-family: 'Space Grotesk', sans-serif; font-size: 15px; letter-spacing: -.035em; text-overflow: ellipsis; white-space: nowrap; }
+.concept-card-type { display: block; margin-top: 4px; color: var(--teal-dark); font-family: 'DM Mono', monospace; font-size: 9px; text-transform: uppercase; }
 .concept-card-definition { display: -webkit-box; overflow: hidden; margin-top: 7px; color: #7f8d9c; font-size: 11px; line-height: 1.45; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
 .concept-card-toggle { display: flex; align-items: center; justify-content: space-between; margin-top: 13px; color: var(--teal-dark); font-family: 'DM Mono', monospace; font-size: 9px; }
 .concept-card-toggle span { color: #8ea0ad; font-size: 15px; line-height: .7; }
@@ -171,6 +172,9 @@ button { color: inherit; cursor: pointer; }
 .concept-evidence-list li { display: grid; gap: 3px; padding-left: 10px; border-left: 2px solid #bfe7df; }
 .concept-evidence-list strong { margin: 0; color: #52647b; font-size: 10px; font-weight: 600; line-height: 1.4; }
 .concept-evidence-list span { color: #8996a4; font-size: 9px; line-height: 1.45; }
+.concept-source-links { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 7px; }
+.concept-source-links a { border-radius: 999px; padding: 4px 7px; background: #eaf8f4; color: var(--teal-dark); font-family: 'DM Mono', monospace; font-size: 9px; text-decoration: none; }
+.concept-source-links a:hover { background: #d9f1ec; }
 .concept-limitations { padding: 9px 10px; border-radius: 7px; background: #fff7f2; }
 .concept-limitations .concept-detail-label { color: var(--coral); }
 .concept-limitations p { color: #9a7f76; }

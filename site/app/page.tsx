@@ -8,7 +8,18 @@ import { demoMap, demoPapers } from '../lib/research-orchestrator';
 type ViewMode = 'map' | 'evidence' | 'notes' | 'concepts';
 const BACKEND_URL = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:8080';
 
-type BackendConcept = { id: string; label: string; kind: MapNode['kind']; description: string; confidence: number };
+type BackendConcept = {
+  id: string;
+  label: string;
+  kind: MapNode['kind'];
+  description: string;
+  confidence: number;
+  concept_type?: string | null;
+  wikipedia_url?: string | null;
+  wikidata_id?: string | null;
+  source_urls?: string[];
+  recognition_status?: ConceptExplanation['recognitionStatus'];
+};
 type BackendConceptExplanation = {
   concept_id: string;
   term: string;
@@ -22,6 +33,11 @@ type BackendConceptExplanation = {
   paper_context: string;
   evidence_ids: string[];
   confidence: number;
+  concept_type?: string | null;
+  wikipedia_url?: string | null;
+  wikidata_id?: string | null;
+  source_urls?: string[];
+  recognition_status?: ConceptExplanation['recognitionStatus'];
 };
 
 type BackendAnalysisResponse = {
@@ -48,6 +64,7 @@ const viewLabels: Record<ViewMode, string> = {
 };
 
 const conceptKindUsage: Record<MapNode['kind'], string> = {
+  concept: 'The paper uses this named entity as a relevant concept or reference point.',
   thesis: 'The paper uses this as its central claim or proposed answer.',
   method: 'The paper uses this as its approach for addressing the research problem.',
   finding: 'The paper uses this to report or interpret an observed result.',
@@ -74,6 +91,11 @@ function fallbackExplanation(concept: BackendConcept): ConceptExplanation {
     paperContext: 'No supporting evidence was extracted for this concept.',
     evidenceIds: [],
     confidence: 0,
+    conceptType: concept.concept_type ?? null,
+    wikipediaUrl: concept.wikipedia_url ?? null,
+    wikidataId: concept.wikidata_id ?? null,
+    sourceUrls: concept.source_urls ?? [],
+    recognitionStatus: concept.recognition_status ?? 'structural',
   };
 }
 
@@ -97,6 +119,11 @@ function toConceptExplanation(explanation: BackendConceptExplanation): ConceptEx
     paperContext: explanation.paper_context,
     evidenceIds: explanation.evidence_ids,
     confidence: explanation.confidence,
+    conceptType: explanation.concept_type ?? null,
+    wikipediaUrl: explanation.wikipedia_url ?? null,
+    wikidataId: explanation.wikidata_id ?? null,
+    sourceUrls: explanation.source_urls ?? [],
+    recognitionStatus: explanation.recognition_status ?? 'recognized',
   };
 }
 
@@ -133,17 +160,29 @@ function CytoscapeMap({ nodes, selectedNode, onSelect }: { nodes: MapNode[]; sel
       metric: { x: graphWidth * 0.75, y: graphHeight * 0.77 },
     };
     const nodeIds = new Set(nodes.map((node) => node.id));
+    const entityPositions = new Map(
+      nodes
+        .filter((node) => node.kind === 'concept')
+        .map((node, index) => [node.id, {
+          x: graphWidth * (0.12 + (index % 4) * 0.25),
+          y: graphHeight * (index % 2 === 0 ? 0.08 : 0.92),
+        }]),
+    );
+    const entityRelationships = nodes
+      .filter((node) => node.kind === 'concept')
+      .map((node) => ({ id: `thesis-${node.id}`, source: 'thesis', target: node.id, label: 'mentions' }));
+    const relationships = [...graphRelationships, ...entityRelationships];
     const cy = cytoscape({
       container: containerRef.current,
       elements: [
         ...nodes.map((node, index) => ({
           data: { id: node.id, label: node.label, kind: node.kind, detail: node.detail },
-          position: graphPositions[node.id] ?? {
+          position: graphPositions[node.id] ?? entityPositions.get(node.id) ?? {
             x: graphWidth * 0.5 + ((index % 3) - 1) * 100,
             y: graphHeight * 0.5 + (Math.floor(index / 3) - 1) * 90,
           },
         })),
-        ...graphRelationships
+        ...relationships
           .filter((relationship) => nodeIds.has(relationship.source) && nodeIds.has(relationship.target))
           .map((relationship) => ({ data: relationship })),
       ],
@@ -188,6 +227,14 @@ function CytoscapeMap({ nodes, selectedNode, onSelect }: { nodes: MapNode[]; sel
             'overlay-color': '#43c4ad',
             'overlay-opacity': 0.08,
             'overlay-padding': 6,
+          },
+        },
+        {
+          selector: 'node[kind = "concept"]',
+          style: {
+            'background-color': '#f4f5ff',
+            'border-color': '#b8bde8',
+            color: '#34366c',
           },
         },
         {
@@ -257,6 +304,8 @@ function CytoscapeMap({ nodes, selectedNode, onSelect }: { nodes: MapNode[]; sel
 
 function ConceptExplanationCard({ explanation, expanded, onToggle }: { explanation: ConceptExplanation; expanded: boolean; onToggle: () => void }) {
   const evidenceLabel = explanation.supportingEvidence.length === 1 ? '1 linked evidence item' : `${explanation.supportingEvidence.length} linked evidence items`;
+  const sourceUrls = explanation.sourceUrls ?? [];
+  const referenceUrls = sourceUrls.filter((url) => url !== explanation.wikipediaUrl && !url.includes('wikidata.org/wiki/')).slice(0, 3);
 
   return (
     <article className={`concept-card ${expanded ? 'concept-card-expanded' : ''}`}>
@@ -266,6 +315,7 @@ function ConceptExplanationCard({ explanation, expanded, onToggle }: { explanati
           <span className={`concept-status concept-status-${explanation.supportStatus}`}>{explanation.supportStatus}</span>
         </span>
         <strong>{explanation.term}</strong>
+        {explanation.conceptType && <span className="concept-card-type">{explanation.conceptType}</span>}
         <span className="concept-card-definition">{explanation.definition}</span>
         <span className="concept-card-toggle">{expanded ? 'Hide explanation' : evidenceLabel}<span aria-hidden="true">{expanded ? '⌃' : '⌄'}</span></span>
       </button>
@@ -298,6 +348,17 @@ function ConceptExplanationCard({ explanation, expanded, onToggle }: { explanati
               </ul>
             ) : <p>{explanation.paperContext}</p>}
           </div>
+          {(explanation.wikipediaUrl || explanation.wikidataId || referenceUrls.length > 0) && (
+            <div className="concept-detail-block">
+              <span className="concept-detail-label">Recognition sources</span>
+              <div className="concept-source-links">
+                {explanation.wikipediaUrl && <a href={explanation.wikipediaUrl} target="_blank" rel="noreferrer">Wikipedia</a>}
+                {explanation.wikidataId && <a href={`https://www.wikidata.org/wiki/${explanation.wikidataId}`} target="_blank" rel="noreferrer">Wikidata</a>}
+                {referenceUrls.map((url, index) => <a key={url} href={url} target="_blank" rel="noreferrer">Reference {index + 1}</a>)}
+              </div>
+              <p>{explanation.recognitionStatus === 'source_supported' ? 'Classified and supported by linked authoritative references.' : 'Classified using a canonical Wikipedia page and Wikidata type.'}</p>
+            </div>
+          )}
           {explanation.reliability.limitations.length > 0 && (
             <div className="concept-limitations"><span className="concept-detail-label">Read with care</span><p>{explanation.reliability.limitations[0]}</p></div>
           )}

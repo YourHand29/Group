@@ -4,6 +4,7 @@ from datetime import datetime
 import re
 from typing import Protocol
 
+from .agents import extract_named_concepts
 from .schemas import PaperAnalysis, PaperRecord, Relationship
 
 
@@ -83,12 +84,44 @@ class DemoResearchModel:
             evidence.append({"id": "evidence-query", "claim": f"The requested concept '{query.strip()}' appears in the extracted paper text.", "kind": "quote", "excerpt": query_matches[0], "source_location": "query match", "confidence": 0.9})
             finding = f"Query match: {query.strip()[:32]}"
         concepts = [
-            {"id": "thesis", "label": title[:48], "kind": "thesis", "description": thesis, "evidence_ids": ["evidence-1"], "confidence": 0.82},
-            {"id": "method", "label": method, "kind": "method", "description": "The central mechanism or approach used by the authors.", "evidence_ids": ["evidence-2"], "confidence": 0.76},
-            {"id": "finding", "label": finding, "kind": "finding", "description": "The main implication reported by the study.", "evidence_ids": ["evidence-3"], "confidence": 0.71},
-            {"id": "experiment", "label": experiment, "kind": "experiment", "description": "The evaluation setup used to test the proposal.", "evidence_ids": ["evidence-2"], "confidence": 0.68},
-            {"id": "metric", "label": metric, "kind": "metric", "description": "The result signal to inspect before reading deeply.", "evidence_ids": ["evidence-3"], "confidence": 0.64},
+            {"id": "thesis", "label": title[:48], "kind": "thesis", "description": thesis, "evidence_ids": ["evidence-1"], "confidence": 0.82, "recognition_status": "structural"},
+            {"id": "method", "label": method, "kind": "method", "description": "The central mechanism or approach used by the authors.", "evidence_ids": ["evidence-2"], "confidence": 0.76, "recognition_status": "structural"},
+            {"id": "finding", "label": finding, "kind": "finding", "description": "The main implication reported by the study.", "evidence_ids": ["evidence-3"], "confidence": 0.71, "recognition_status": "structural"},
+            {"id": "experiment", "label": experiment, "kind": "experiment", "description": "The evaluation setup used to test the proposal.", "evidence_ids": ["evidence-2"], "confidence": 0.68, "recognition_status": "structural"},
+            {"id": "metric", "label": metric, "kind": "metric", "description": "The result signal to inspect before reading deeply.", "evidence_ids": ["evidence-3"], "confidence": 0.64, "recognition_status": "structural"},
         ]
+
+        # Keep the stable structural concepts above for the map, then append
+        # paper-specific entities recognized by spaCy's NER pipeline.
+        for index, entity in enumerate(extract_named_concepts(text), start=1):
+            evidence_id = f"evidence-entity-{index}"
+            evidence.append({
+                "id": evidence_id,
+                "claim": f"The paper mentions {entity.term}.",
+                "kind": "quote",
+                "excerpt": entity.excerpt,
+                "source_location": f"character {entity.start_char}",
+                "confidence": 0.72,
+            })
+            concepts.append({
+                "id": f"entity-{index}",
+                "label": entity.term,
+                "kind": "concept",
+                "description": (
+                    f"{entity.concept_type.title()} documented as {entity.term}. "
+                    f"{entity.knowledge_description} "
+                    f"Recognized in the paper as a {entity.entity_type.lower()} mention "
+                    f"({entity.mentions} occurrence(s))."
+                ),
+                "evidence_ids": [evidence_id],
+                "confidence": entity.confidence,
+                "concept_type": entity.concept_type,
+                "wikipedia_url": entity.wikipedia_url,
+                "wikidata_id": entity.wikidata_id,
+                "source_urls": list(entity.source_urls),
+                "recognition_status": entity.recognition_status,
+            })
+
         return PaperAnalysis(
             metadata={"title": title, "authors": ["Imported document"], "year": year, "source_url": source_url},
             thesis=thesis,

@@ -1,4 +1,5 @@
-export type NodeKind = 'thesis' | 'method' | 'finding' | 'experiment' | 'metric';
+export type NodeKind = 'thesis' | 'method' | 'finding' | 'experiment' | 'metric' | 'concept';
+export type ConceptRecognitionStatus = 'structural' | 'recognized' | 'classified' | 'source_supported';
 
 export type MapNode = {
   id: string;
@@ -37,6 +38,11 @@ export type ConceptExplanation = {
   paperContext: string;
   evidenceIds: string[];
   confidence: number;
+  conceptType?: string | null;
+  wikipediaUrl?: string | null;
+  wikidataId?: string | null;
+  sourceUrls?: string[];
+  recognitionStatus?: ConceptRecognitionStatus;
 };
 
 export type PaperMap = {

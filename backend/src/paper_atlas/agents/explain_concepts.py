@@ -10,7 +10,7 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
-from ..schemas import Concept, ConceptKind, Evidence
+from ..schemas import Concept, ConceptKind, ConceptRecognitionStatus, Evidence
 
 
 class ConceptExplanation(BaseModel):
@@ -31,6 +31,11 @@ class ConceptExplanation(BaseModel):
     paper_context: str = Field(min_length=1)
     evidence_ids: list[str] = Field(default_factory=list)
     confidence: float = Field(ge=0, le=1)
+    concept_type: str | None = None
+    wikipedia_url: str | None = None
+    wikidata_id: str | None = None
+    source_urls: list[str] = Field(default_factory=list)
+    recognition_status: ConceptRecognitionStatus = "structural"
 
 
 class EvidenceSupport(BaseModel):
@@ -56,6 +61,7 @@ ConceptExplanation.model_rebuild()
 
 
 _KIND_GUIDANCE = {
+    "concept": "Explain why this named entity matters to the paper's argument or experimental context.",
     "thesis": "This is the paper's main claim or proposed answer to its research question.",
     "method": "This is the approach or mechanism the authors use to address the research problem.",
     "finding": "This is an important result or implication reported by the paper.",
@@ -64,6 +70,7 @@ _KIND_GUIDANCE = {
 }
 
 _KIND_USAGE = {
+    "concept": "Use it as a named concept or entity when orienting yourself in the paper.",
     "thesis": "The paper uses this as its central claim or proposed answer.",
     "method": "The paper uses this as its approach for addressing the research problem.",
     "finding": "The paper uses this to report or interpret an observed result.",
@@ -163,6 +170,11 @@ def explain_concepts(concepts: list[Concept], evidence: list[Evidence]) -> list[
                 paper_context=evidence_summary,
                 evidence_ids=list(concept.evidence_ids),
                 confidence=confidence,
+                concept_type=concept.concept_type,
+                wikipedia_url=concept.wikipedia_url,
+                wikidata_id=concept.wikidata_id,
+                source_urls=list(concept.source_urls),
+                recognition_status=concept.recognition_status,
             )
         )
 

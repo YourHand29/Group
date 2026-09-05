@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from urllib.parse import urlparse
 
-from .agents import explain_concepts
+from .agents import explain_concepts, named_entity_model_available
 from .config import Settings
 from .model import DemoResearchModel, ResearchModel, search_text
 from .schemas import PaperAnalysis
@@ -44,6 +44,9 @@ def ingest_document(state: ResearchState, settings: Settings) -> dict:
 
 def extract_structure(state: ResearchState, model: ResearchModel) -> dict:
     analysis = model.extract(state["raw_text"], state.get("source_url"), state.get("query"))
+    warnings = [] if named_entity_model_available() else [
+        "Named-entity concepts were unavailable; install spaCy's en_core_web_sm model."
+    ]
     return {
         "paper": analysis,
         "thesis": analysis.thesis,
@@ -52,6 +55,7 @@ def extract_structure(state: ResearchState, model: ResearchModel) -> dict:
         "query_matches": search_text(state["raw_text"], state.get("query")),
         "status": "structured",
         "trace": [f"Extracted {len(analysis.concepts)} concepts and {len(analysis.evidence)} evidence items"],
+        "warnings": warnings,
         "errors": [],
     }
 

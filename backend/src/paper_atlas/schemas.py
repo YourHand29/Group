@@ -4,7 +4,8 @@ from pydantic import BaseModel, Field, field_validator
 
 
 SourceType = Literal["text", "url"]
-ConceptKind = Literal["thesis", "method", "finding", "experiment", "metric"]
+ConceptKind = Literal["thesis", "method", "finding", "experiment", "metric", "concept"]
+ConceptRecognitionStatus = Literal["structural", "recognized", "classified", "source_supported"]
 EvidenceKind = Literal["statistic", "experiment", "quote", "dataset", "context"]
 RelationshipType = Literal["supports", "measures", "extends", "contradicts", "similar"]
 
@@ -61,6 +62,11 @@ class Concept(BaseModel):
     description: str = Field(min_length=1)
     evidence_ids: list[str] = Field(default_factory=list)
     confidence: float = Field(ge=0, le=1)
+    concept_type: str | None = None
+    wikipedia_url: str | None = None
+    wikidata_id: str | None = None
+    source_urls: list[str] = Field(default_factory=list)
+    recognition_status: ConceptRecognitionStatus = "structural"
 
 
 class Relationship(BaseModel):
