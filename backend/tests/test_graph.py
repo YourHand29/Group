@@ -1,3 +1,5 @@
+from paper_atlas.agents import ScannedDocument
+from paper_atlas.model import ResearchModel
 from paper_atlas.graph import run_analysis
 from paper_atlas.schemas import AnalysisRequest, PaperRecord
 
@@ -23,3 +25,15 @@ def test_invalid_url_is_rejected_before_ingestion() -> None:
 
     assert response.status == "failed"
     assert any("valid http(s) URL" in warning for warning in response.warnings)
+
+
+def test_scanned_document_adapter_preserves_paragraph_order() -> None:
+    document = ScannedDocument.model_validate({
+        "text": "First paragraph.\n\nSecond paragraph.",
+        "paragraphs": [
+            {"id": "paragraph-0000", "text": "First paragraph.", "index": 0, "start_char": 0, "end_char": 16},
+            {"id": "paragraph-0001", "text": "Second paragraph.", "index": 1, "start_char": 18, "end_char": 35},
+        ],
+    })
+
+    assert ResearchModel.scanned_documents_to_text([document]) == "First paragraph.\n\nSecond paragraph."
