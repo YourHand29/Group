@@ -52,48 +52,264 @@ def search_text(text: str, query: str | None) -> list[str]:
     return matches[:3]
 
 
+_SECTION_RE = re.compile(
+    r"^\s*(?:\d+(?:\.\d+)*[\s.)-]+)?"
+    r"(?P<section>abstract|introduction|background|related work|literature review|"
+    r"method|methods|methodology|approach|materials and methods|experiments?|evaluation|"
+    r"results?|findings?|discussion|conclusion|limitations?)\s*:?[\s.]*$",
+    re.IGNORECASE,
+)
+_METHOD_CUES = ("propose", "present", "introduce", "develop", "design", "use", "apply", "adopt", "employ")
+_FINDING_CUES = ("show", "find", "demonstrat", "achiev", "improv", "outperform", "increase", "decrease", "reduce", "result")
+_EXPERIMENT_CUES = ("evaluat", "experiment", "benchmark", "dataset", "corpus", "participants", "test", "trained on", "measured on")
+_METRIC_CUES = ("accuracy", "precision", "recall", "f1", "auc", "bleu", "rouge", "score", "error", "loss", "latency", "runtime", "reduction", "improvement", "significant")
+
+
+def _compact_text(value: str, limit: int = 280) -> str:
+    clean = " ".join(value.split()).strip()
+    if len(clean) <= limit:
+        return clean
+    shortened = clean[: limit - 1].rsplit(" ", 1)[0].rstrip(" ,;:")
+    return f"{shortened}…"
+
+
+def _sentence_parts(value: str) -> list[str]:
+    clean = " ".join(value.split()).strip()
+    if not clean:
+        return []
+    return [part.strip() for part in re.split(r"(?<=[.!?])\s+(?=[A-Z0-9(])", clean) if part.strip()]
+
+
+def _paper_sentences(text: str) -> list[tuple[str, str]]:
+    """Return substantive sentences with the nearest paper section label."""
+
+    sentences: list[tuple[str, str]] = []
+    section = "opening"
+    for raw_line in text.splitlines():
+        line = " ".join(raw_line.split()).strip(" -\t")
+        if not line:
+            continue
+        match = _SECTION_RE.match(line)
+        if match:
+            section = match.group("section").casefold()
+            continue
+        for sentence in _sentence_parts(line):
+            if len(re.findall(r"[A-Za-z0-9]+", sentence)) >= 5:
+                sentences.append((sentence, section))
+    if not sentences:
+        sentences = [(sentence, "opening") for sentence in _sentence_parts(text)]
+    return sentences
+
+
+def _best_paper_sentence(
+    sentences: list[tuple[str, str]],
+    cues: tuple[str, ...],
+    preferred_sections: tuple[str, ...] = (),
+) -> tuple[str, str] | None:
+    candidates: list[tuple[int, int, str, str]] = []
+    for index, (sentence, section) in enumerate(sentences):
+        lower = sentence.casefold()
+        if len(sentence) < 25:
+            continue
+        cue_score = sum(1 for cue in cues if re.search(rf"\b{re.escape(cue.casefold())}\w*\b", lower))
+        section_score = 2 if any(preferred in section for preferred in preferred_sections) else 0
+        # Avoid selecting a bare title or author line when a sentence with a
+        # research verb is available.
+        if cue_score == 0 and cues:
+            continue
+        candidates.append((cue_score + section_score, -index, sentence, section))
+    if not candidates:
+        return None
+    candidates.sort(reverse=True)
+    _, _, sentence, section = candidates[0]
+    return _compact_text(sentence), section
+
+
+def _first_substantive_sentence(sentences: list[tuple[str, str]]) -> tuple[str, str] | None:
+    for sentence, section in sentences:
+        if len(sentence) >= 35:
+            return _compact_text(sentence), section
+    return sentences[0] if sentences else None
+
+
+def _phrase_after_cue(sentence: str, cues: tuple[str, ...], limit: int = 64) -> str | None:
+    cue_pattern = "|".join(re.escape(cue) for cue in cues)
+    match = re.search(rf"\b(?:{cue_pattern})\w*\b\s+(?:a|an|the|our|this|their)?\s*(?P<phrase>[^.;,:]+)", sentence, re.IGNORECASE)
+    if not match:
+        return None
+    phrase = re.split(r"\s+(?:to|for|on|across|from|that|which|while|using|with|and|compared|versus|against|relative)\s+", match.group("phrase"), maxsplit=1, flags=re.IGNORECASE)[0]
+    phrase = _compact_text(phrase, limit).strip(" .,")
+    return phrase if len(phrase) >= 4 else None
+
+
+def _metric_label(sentence: str) -> str | None:
+    metric = re.search(
+        r"\b(?:accuracy|precision|recall|F1(?:-score)?|AUC|BLEU|ROUGE|score|error|loss|latency|runtime|reduction|improvement)\b",
+        sentence,
+        re.IGNORECASE,
+    )
+    if not metric:
+        return None
+    number = re.search(r"[+-]?\d+(?:\.\d+)?\s*(?:%|percent|percentage points)?", sentence)
+    if number:
+        return f"{metric.group(0)} ({number.group(0).strip()})"
+    return metric.group(0)
+
+
+def _label_from_sentence(sentence: str, cues: tuple[str, ...], fallback: str) -> str:
+    phrase = _phrase_after_cue(sentence, cues)
+    if phrase:
+        return phrase[0].upper() + phrase[1:]
+    words = sentence.split()
+    if len(words) > 8:
+        return _compact_text(" ".join(words[:8]), 58).rstrip(".,") + "…"
+    return sentence.rstrip(".") or fallback
+
+
+def _experiment_label(sentence: str) -> str:
+    """Prefer the named dataset, benchmark, task, or sample in an evaluation sentence."""
+
+    match = re.search(r"\b(?:on|using|across|with)\s+(?:the\s+)?(?P<subject>[^.;,:]+)", sentence, re.IGNORECASE)
+    if match:
+        subject = re.split(r"\s+(?:to|for|that|which|and|compared|versus|against)\s+", match.group("subject"), maxsplit=1, flags=re.IGNORECASE)[0]
+        subject = _compact_text(subject, 58).strip(" .,")
+        if len(subject) >= 4:
+            return subject[0].upper() + subject[1:]
+    return _label_from_sentence(sentence, ("evaluate", "experiment", "benchmark", "test", "measure"), "Evaluation described in the paper")
+
+
+def _evidence(
+    evidence_id: str,
+    claim: str,
+    source: tuple[str, str] | None,
+    kind: str,
+    fallback: str,
+    confidence: float,
+) -> dict[str, object]:
+    sentence, section = source or (fallback, "paper text")
+    return {
+        "id": evidence_id,
+        "claim": claim,
+        "kind": kind,
+        "excerpt": _compact_text(sentence, 420),
+        "source_location": f"{section.title()} section" if section != "opening" else "opening text",
+        "confidence": confidence,
+    }
+
+
 class DemoResearchModel:
     """Deterministic stand-in that keeps the workflow runnable without an API key."""
 
     def extract(self, text: str, source_url: str | None = None, query: str | None = None) -> PaperAnalysis:
-        lower_text = text.lower()
         title = _first_line(text)
         year_match = re.search(r"\b(19|20)\d{2}\b", text)
         year = int(year_match.group(0)) if year_match else None
         query_matches = search_text(text, query)
 
-        if any(term in lower_text for term in ("attention", "transformer", "sequence")):
-            thesis = "The paper argues that attention-based representations make long-range relationships easier to model in parallel."
-            method = "Attention-based representation"
-            finding = "Parallel context mixing"
-            experiment = "Benchmark comparison"
-            metric = "Reported quality improvement"
-        else:
-            thesis = "The paper proposes a focused method and evaluates it against measurable outcomes."
-            method = "Proposed method"
-            finding = "Primary finding"
-            experiment = "Experimental evaluation"
-            metric = "Reported result"
+        sentences = _paper_sentences(text)
+        opening_source = _first_substantive_sentence(sentences)
+        thesis_source = _best_paper_sentence(
+            sentences,
+            ("propose", "present", "introduce", "develop", "investigate", "aim", "show", "demonstrate"),
+            ("abstract", "introduction", "conclusion", "discussion"),
+        ) or opening_source
+        thesis = thesis_source[0] if thesis_source else f"The paper studies {title}."
+
+        method_source = _best_paper_sentence(
+            sentences,
+            _METHOD_CUES,
+            ("method", "approach", "experiment", "evaluation"),
+        ) or _best_paper_sentence(
+            sentences,
+            ("method", "architecture", "model", "framework", "approach"),
+            ("method", "approach", "experiment", "evaluation"),
+        )
+        finding_source = _best_paper_sentence(
+            sentences,
+            _FINDING_CUES,
+            ("result", "finding", "discussion", "conclusion", "abstract"),
+        ) or thesis_source
+        experiment_source = _best_paper_sentence(
+            sentences,
+            _EXPERIMENT_CUES,
+            ("experiment", "evaluation", "method"),
+        ) or method_source
+        metric_source = _best_paper_sentence(
+            sentences,
+            _METRIC_CUES,
+            ("result", "finding", "evaluation", "experiment"),
+        ) or finding_source
+
+        method_label = _label_from_sentence(
+            method_source[0], _METHOD_CUES, "Method described in the paper"
+        ) if method_source else "Method described in the paper"
+        finding_label = _label_from_sentence(
+            finding_source[0], _FINDING_CUES, "Finding reported by the paper"
+        ) if finding_source else "Finding reported by the paper"
+        experiment_label = _experiment_label(experiment_source[0]) if experiment_source else "Evaluation described in the paper"
+        metric_label = _metric_label(metric_source[0]) if metric_source else None
+        metric_label = metric_label or _label_from_sentence(
+            metric_source[0], ("report", "measure", "achieve", "improv", "reduce"), "Result reported by the paper"
+        ) if metric_source else "Result reported by the paper"
 
         evidence = [
-            {"id": "evidence-1", "claim": "The paper establishes a central research question.", "kind": "context", "excerpt": text[: min(420, len(text))], "source_location": "opening text", "confidence": 0.82},
-            {"id": "evidence-2", "claim": "The paper describes a method for addressing the question.", "kind": "experiment", "excerpt": text[: min(420, len(text))], "source_location": "extracted text", "confidence": 0.74},
-            {"id": "evidence-3", "claim": "The paper reports an outcome that can be compared.", "kind": "statistic", "excerpt": text[: min(420, len(text))], "source_location": "extracted text", "confidence": 0.68},
+            _evidence(
+                "evidence-context",
+                "The paper frames its research question or central claim.",
+                thesis_source or opening_source,
+                "context",
+                text,
+                0.84,
+            ),
+            _evidence(
+                "evidence-method",
+                f"The paper describes the approach: {method_label}.",
+                method_source or thesis_source,
+                "experiment",
+                text,
+                0.80,
+            ),
+            _evidence(
+                "evidence-finding",
+                f"The paper reports this outcome: {finding_label}.",
+                finding_source or thesis_source,
+                "statistic",
+                text,
+                0.78,
+            ),
+            _evidence(
+                "evidence-experiment",
+                f"The paper evaluates its claim using {experiment_label}.",
+                experiment_source or method_source,
+                "dataset",
+                text,
+                0.76,
+            ),
+            _evidence(
+                "evidence-metric",
+                f"The paper provides a measurable result: {metric_label}.",
+                metric_source or finding_source,
+                "statistic",
+                text,
+                0.73,
+            ),
         ]
         if query_matches:
             evidence.append({"id": "evidence-query", "claim": f"The requested concept '{query.strip()}' appears in the extracted paper text.", "kind": "quote", "excerpt": query_matches[0], "source_location": "query match", "confidence": 0.9})
-            finding = f"Query match: {query.strip()[:32]}"
         concepts = [
-            {"id": "thesis", "label": title[:48], "kind": "thesis", "description": thesis, "evidence_ids": ["evidence-1"], "confidence": 0.82, "recognition_status": "structural"},
-            {"id": "method", "label": method, "kind": "method", "description": "The central mechanism or approach used by the authors.", "evidence_ids": ["evidence-2"], "confidence": 0.76, "recognition_status": "structural"},
-            {"id": "finding", "label": finding, "kind": "finding", "description": "The main implication reported by the study.", "evidence_ids": ["evidence-3"], "confidence": 0.71, "recognition_status": "structural"},
-            {"id": "experiment", "label": experiment, "kind": "experiment", "description": "The evaluation setup used to test the proposal.", "evidence_ids": ["evidence-2"], "confidence": 0.68, "recognition_status": "structural"},
-            {"id": "metric", "label": metric, "kind": "metric", "description": "The result signal to inspect before reading deeply.", "evidence_ids": ["evidence-3"], "confidence": 0.64, "recognition_status": "structural"},
+            {"id": "thesis", "label": title[:72], "kind": "thesis", "description": thesis, "evidence_ids": ["evidence-context"], "confidence": 0.84, "recognition_status": "structural"},
+            {"id": "method", "label": method_label, "kind": "method", "description": method_source[0] if method_source else "The paper does not expose a clear method section in the extracted text.", "evidence_ids": ["evidence-method"], "confidence": 0.80, "recognition_status": "structural"},
+            {"id": "finding", "label": finding_label, "kind": "finding", "description": finding_source[0] if finding_source else "The paper does not expose a clear findings section in the extracted text.", "evidence_ids": ["evidence-finding"], "confidence": 0.78, "recognition_status": "structural"},
+            {"id": "experiment", "label": experiment_label, "kind": "experiment", "description": experiment_source[0] if experiment_source else "The paper does not expose a clear evaluation description in the extracted text.", "evidence_ids": ["evidence-experiment"], "confidence": 0.76, "recognition_status": "structural"},
+            {"id": "metric", "label": metric_label, "kind": "metric", "description": metric_source[0] if metric_source else "The paper does not expose a clear measurable result in the extracted text.", "evidence_ids": ["evidence-metric"], "confidence": 0.73, "recognition_status": "structural"},
         ]
 
-        # Keep the stable structural concepts above for the map, then append
-        # paper-specific entities recognized by spaCy's NER pipeline.
+        # Add only paper-specific entities that the recognition pipeline can
+        # link to a documented concept; do not manufacture unsupported labels.
+        structural_labels = {concept["label"].casefold() for concept in concepts}
         for index, entity in enumerate(extract_named_concepts(text), start=1):
+            if entity.term.casefold() in structural_labels:
+                continue
             evidence_id = f"evidence-entity-{index}"
             evidence.append({
                 "id": evidence_id,
@@ -126,9 +342,9 @@ class DemoResearchModel:
             metadata={"title": title, "authors": ["Imported document"], "year": year, "source_url": source_url},
             thesis=thesis,
             plain_language_summary=(
-                f"The requested concept '{query.strip()}' was found in the extracted text. The document has also been reduced into a thesis, method, finding, experiment, and result signal."
+                f"Central claim: {thesis} Evaluation: {experiment_label}. Key result signal: {metric_label}. The requested concept '{query.strip()}' was also found in the extracted text."
                 if query_matches and query else
-                "The document has been reduced into a thesis, method, finding, experiment, and result signal."
+                f"Central claim: {thesis} Evaluation: {experiment_label}. Key result signal: {metric_label}."
             ),
             relevance=80 if query_matches else 70,
             concepts=concepts,

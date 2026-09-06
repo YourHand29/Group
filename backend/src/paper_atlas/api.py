@@ -9,7 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from .config import get_settings
 from .graph import run_analysis
 from .schemas import AnalysisRequest, AnalysisResponse, PaperRecord
-from .tools.documents import DocumentIngestionError, extract_uploaded_file
+from .tools.documents import DocumentIngestionError, extract_uploaded_file_details
 
 settings = get_settings()
 app = FastAPI(title="Paper Atlas Agent API", version="0.1.0")
@@ -48,13 +48,18 @@ async def analyze_file(
     try:
         papers = [PaperRecord.model_validate(item) for item in json.loads(existing_papers)]
         content = await file.read()
-        text = extract_uploaded_file(
+        document = extract_uploaded_file_details(
             file.filename or "upload",
             file.content_type or "application/octet-stream",
             content,
             settings.max_document_chars,
         )
-        response = run_analysis(AnalysisRequest(source_type="text", source=text, existing_papers=papers, query=instruction.strip() or None))
+        response = run_analysis(AnalysisRequest(source_type="text", source=document.text, existing_papers=papers, query=instruction.strip() or None))
+        response.document_format = document.format
+        response.ocr_used = document.ocr_used
+        # DocumentRead stores immutable warnings as a tuple, while the API
+        # schema exposes warnings as a list. Normalize before combining them.
+        response.warnings = list(document.warnings) + response.warnings
     except (json.JSONDecodeError, TypeError, ValueError, DocumentIngestionError) as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except Exception as exc:

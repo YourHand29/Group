@@ -75,6 +75,8 @@ def response_from_state(state: ResearchState) -> AnalysisResponse:
         return AnalysisResponse(
             run_id=state["run_id"],
             status="failed",
+            document_format=state.get("document_format"),
+            ocr_used=state.get("ocr_used", False),
             warnings=state.get("warnings", []) + state.get("errors", []),
             trace=state.get("trace", []),
         )
@@ -82,6 +84,8 @@ def response_from_state(state: ResearchState) -> AnalysisResponse:
         run_id=state["run_id"],
         status="completed" if state.get("status") == "completed" else "failed",
         paper=analysis.metadata,
+        document_format=state.get("document_format"),
+        ocr_used=state.get("ocr_used", False),
         thesis=state.get("thesis", analysis.thesis),
         summary=state.get("summary", analysis.plain_language_summary),
         relevance=state.get("relevance", analysis.relevance),

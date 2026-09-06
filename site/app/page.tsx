@@ -56,11 +56,48 @@ type BackendAnalysisResponse = {
   query_matches: string[];
 };
 
+function formatErrorDetail(detail: unknown): string {
+  if (typeof detail === 'string' && detail.trim()) return detail;
+  if (Array.isArray(detail)) {
+    const messages = detail.map((item) => {
+      if (typeof item === 'string') return item;
+      if (item && typeof item === 'object') {
+        const record = item as { msg?: unknown; message?: unknown };
+        if (typeof record.msg === 'string') return record.msg;
+        if (typeof record.message === 'string') return record.message;
+      }
+      return String(item);
+    }).filter(Boolean);
+    if (messages.length) return messages.join('\n');
+  }
+  if (detail && typeof detail === 'object') {
+    const record = detail as { message?: unknown; detail?: unknown };
+    if (typeof record.message === 'string') return record.message;
+    if (typeof record.detail === 'string') return record.detail;
+  }
+  return 'The analysis service rejected this paper.';
+}
+
 const viewLabels: Record<ViewMode, string> = {
   map: 'Map',
   evidence: 'Evidence',
   notes: 'Notes',
   concepts: 'Concepts',
+};
+
+const freshMap: PaperMap = {
+  title: 'Preparing a new paper map',
+  summary: 'The previous map has been cleared. This analysis will use only the newly submitted paper.',
+  relevance: 0,
+  nodes: [],
+  explanations: [],
+};
+
+const emptySelectedNode: MapNode = {
+  id: 'fresh-analysis',
+  kind: 'thesis',
+  label: 'New paper analysis',
+  detail: 'Submit a paper to build an independent map.',
 };
 
 const conceptKindUsage: Record<MapNode['kind'], string> = {
@@ -400,6 +437,23 @@ function PaperCard({ paper, active, onClick }: { paper: PaperSummary; active: bo
   );
 }
 
+function ErrorDialog({ message, onDismiss }: { message: string; onDismiss: () => void }) {
+  return (
+    <div className="error-dialog-backdrop" role="presentation">
+      <section className="error-dialog" role="alertdialog" aria-modal="true" aria-labelledby="error-dialog-title" aria-describedby="error-dialog-message">
+        <div className="error-dialog-icon" aria-hidden="true">!</div>
+        <div className="error-dialog-content">
+          <span className="error-dialog-eyebrow">ANALYSIS ERROR</span>
+          <h2 id="error-dialog-title">We could not read this source</h2>
+          <p id="error-dialog-message">{message}</p>
+          <button type="button" className="error-dialog-button" onClick={onDismiss}>Close</button>
+        </div>
+        <button type="button" className="error-dialog-close" aria-label="Dismiss error" onClick={onDismiss}>×</button>
+      </section>
+    </div>
+  );
+}
+
 export default function Home() {
   const [paperInput, setPaperInput] = useState('https://arxiv.org/abs/1706.03762');
   const [fileName, setFileName] = useState('');
@@ -412,11 +466,12 @@ export default function Home() {
   const [expandedConceptId, setExpandedConceptId] = useState<string | null>(null);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [status, setStatus] = useState('Ready to map a new paper');
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [relationshipSummary, setRelationshipSummary] = useState('Paper 01 and Paper 02 converge on efficient context mixing.');
   const [relationshipCount, setRelationshipCount] = useState(2);
 
   const selectedNodeData = useMemo(
-    () => map.nodes.find((node) => node.id === selectedNode) ?? map.nodes[0],
+    () => map.nodes.find((node) => node.id === selectedNode) ?? map.nodes[0] ?? emptySelectedNode,
     [map.nodes, selectedNode],
   );
 
@@ -428,18 +483,31 @@ export default function Home() {
   const handleAnalyze = async () => {
     if (!paperInput.trim() && !fileName) {
       setStatus('Add a paper link, abstract, or text file first');
+      setErrorMessage('Add a paper link, abstract, or text file before starting the analysis.');
       return;
     }
 
     if (fileName && !selectedFile) {
       setStatus('This file could not be read as text');
+      setErrorMessage('The selected file is no longer available. Choose the file again and retry.');
       return;
     }
 
+    // Every submission starts a new isolated map. The existing library is
+    // cleared visually and no previous papers are sent to the backend as
+    // comparison context unless that workflow is explicitly added later.
+    setMap(freshMap);
+    setPapers([]);
+    setActivePaper('');
+    setSelectedNode('fresh-analysis');
+    setExpandedConceptId(null);
+    setRelationshipCount(0);
+    setRelationshipSummary('This map is independent and has no previous-paper context.');
     setIsAnalyzing(true);
-    setStatus('Reading the paper and finding its signal…');
+    setErrorMessage(null);
+    setStatus('Starting a fresh paper analysis…');
     try {
-      const existingPapers = papers.map((paper) => ({ id: paper.id, title: paper.title, concepts: [paper.title, paper.authors] }));
+      const existingPapers: Array<{ id: string; title: string; concepts: string[] }> = [];
       const response = selectedFile
         ? await (() => {
             const formData = new FormData();
@@ -460,7 +528,7 @@ export default function Home() {
       const result = (await response.json()) as BackendAnalysisResponse | { detail?: string | string[] };
       if (!response.ok || !('concepts' in result) || result.status !== 'completed' || !result.paper) {
         const detail = 'detail' in result ? result.detail : undefined;
-        throw new Error(Array.isArray(detail) ? detail.join(', ') : detail || 'The analysis service rejected this paper');
+        throw new Error(formatErrorDetail(detail));
       }
 
       const nextMap: PaperMap = {
@@ -474,7 +542,7 @@ export default function Home() {
       };
       const nextPaper: PaperSummary = {
         id: result.run_id,
-        code: `PAPER ${String(papers.length + 1).padStart(2, '0')}`,
+        code: 'PAPER 01',
         title: result.paper.title,
         authors: result.paper.authors.join(', ') || 'Imported document',
         year: result.paper.year ? String(result.paper.year) : '—',
@@ -482,7 +550,7 @@ export default function Home() {
         status: 'Mapped',
       };
       setMap(nextMap);
-      setPapers((current) => [nextPaper, ...current.filter((paper) => paper.id !== nextPaper.id)]);
+      setPapers([nextPaper]);
       setActivePaper(nextPaper.id);
       setSelectedNode(result.concepts[0]?.id ?? 'thesis');
       setExpandedConceptId(null);
@@ -495,7 +563,9 @@ export default function Home() {
         : '';
       setStatus(`Map ready · ${result.concepts.length} concepts connected${queryStatus}`);
     } catch (error) {
-      setStatus(error instanceof Error ? error.message : 'Could not reach the analysis service');
+      const message = error instanceof Error ? error.message : 'Could not reach the analysis service';
+      setStatus('Analysis failed');
+      setErrorMessage(message);
     } finally {
       setIsAnalyzing(false);
     }
@@ -506,11 +576,13 @@ export default function Home() {
     if (!file) return;
     setFileName(file.name);
     setSelectedFile(file);
+    setErrorMessage(null);
     setStatus(`${file.name} is ready to analyze`);
   };
 
   return (
     <main className="atlas-shell">
+      {errorMessage ? <ErrorDialog message={errorMessage} onDismiss={() => setErrorMessage(null)} /> : null}
       <aside className="sidebar">
         <div className="brand-lockup">
           <span className="brand-mark"><i /><i /><i /></span>

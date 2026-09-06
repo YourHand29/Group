@@ -7,7 +7,7 @@ from .config import Settings
 from .model import DemoResearchModel, ResearchModel, search_text
 from .schemas import PaperAnalysis
 from .state import ResearchState
-from .tools.documents import DocumentIngestionError, chunk_text, load_document
+from .tools.documents import DocumentIngestionError, chunk_text, load_document_details
 
 
 def validate_input(state: ResearchState) -> dict:
@@ -24,18 +24,28 @@ def validate_input(state: ResearchState) -> dict:
 
 def ingest_document(state: ResearchState, settings: Settings) -> dict:
     try:
-        raw_text, source_url = load_document(
+        document = load_document_details(
             state["source_type"],
             state["source"],
             settings.max_document_chars,
         )
-        chunks = chunk_text(raw_text, settings.max_chunk_chars)
+        chunks = chunk_text(document.text, settings.max_chunk_chars)
+        trace = [f"Document read as {document.format} into {len(chunks)} paper-text chunk(s)"]
+        if document.format == "pdf" and state["source_type"] == "url":
+            trace.append("Preferred the linked PDF for analysis")
+        if document.format == "html":
+            trace.append("No usable linked PDF was found; used the paper-content portion of the page")
+        if document.ocr_used:
+            trace.append("Used OCR for image-only or low-text PDF pages")
         return {
-            "raw_text": raw_text,
-            "source_url": source_url,
+            "raw_text": document.text,
+            "source_url": document.source_url,
             "chunks": chunks,
+            "document_format": document.format,
+            "ocr_used": document.ocr_used,
             "status": "ingested",
-            "trace": [f"Document ingested into {len(chunks)} chunk(s)"],
+            "trace": trace,
+            "warnings": list(document.warnings),
             "errors": [],
         }
     except DocumentIngestionError as exc:

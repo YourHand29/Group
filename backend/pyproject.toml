@@ -24,6 +24,11 @@ dependencies = [
 dev = [
   "pytest>=8.0,<9.0",
 ]
+ocr = [
+  "Pillow>=10.0,<13.0",
+  "pdf2image>=1.17,<2.0",
+  "pytesseract>=0.3.13,<1.0",
+]
 
 [project.scripts]
 paper-atlas-api = "paper_atlas.api:run"

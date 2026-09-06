@@ -12,6 +12,8 @@ class ResearchState(TypedDict, total=False):
     source: str
     query: str | None
     source_url: str | None
+    document_format: str
+    ocr_used: bool
     raw_text: str
     chunks: list[DocumentChunk]
     paper: PaperAnalysis

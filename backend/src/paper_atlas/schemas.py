@@ -91,6 +91,8 @@ class AnalysisResponse(BaseModel):
     run_id: str
     status: Literal["completed", "failed"]
     paper: PaperMetadata | None = None
+    document_format: str | None = None
+    ocr_used: bool = False
     thesis: str = ""
     summary: str = ""
     relevance: int = Field(default=0, ge=0, le=100)

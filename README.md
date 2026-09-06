@@ -189,13 +189,28 @@ For a local PDF, TXT, or Markdown file, use the multipart endpoint. The web UI u
 Invoke-RestMethod -Method Post -Uri http://localhost:8080/analyze-file -Form @{ file = Get-Item ".\paper.pdf"; existing_papers = "[]" }
 ```
 
+### Paper text extraction and OCR
+
+When a user submits an HTTP(S) paper page, the backend first checks the page for a publisher or repository PDF link (`citation_pdf_url`, PDF links, embeds, and alternate PDF links). If a readable PDF is found, its URL becomes the effective paper source. Only when no usable PDF is available does the backend fall back to the article-content portion of the HTML page.
+
+PDF extraction removes repeated page headers and footers, publication boilerplate, page numbers, and sections after the main paper body such as references, acknowledgements, supplementary material, and appendices. The title, abstract, keywords, and main sections are retained because they are part of the paper text needed for screening. The same body filter is applied to text and Markdown uploads.
+
+Text-based PDFs are read with `pypdf`. For scanned or image-only PDFs, install the optional OCR dependencies:
+
+```powershell
+cd backend
+python -m pip install -e ".[ocr]"
+```
+
+OCR also requires the Tesseract OCR executable and Poppler's PDF rendering tools. Install both for Windows and make sure `tesseract.exe` and `pdftoppm.exe` are available on `PATH`. You can configure OCR with `PAPER_ATLAS_OCR_LANG` (default `eng`) and `PAPER_ATLAS_OCR_DPI` (default `220`). If OCR is not installed, text PDFs still work; an image-only PDF returns an actionable ingestion error instead of sending webpage chrome or an empty document to the model.
+
 ## What is intentionally not finished yet
 
 - The model provider is still a deterministic demo model; no API key is required. The frontend now calls the Python `/analyze` endpoint, so URL/text submissions execute the backend graph.
 - Paper concepts are augmented with spaCy named-entity recognition, then filtered to entities with an English Wikipedia article. The first setup downloads `en_core_web_sm`; set `PAPER_ATLAS_SPACY_MODEL` to another installed spaCy pipeline when a domain-specific model is preferred.
 - Concept recognition also extracts noun phrases and named-law/theory patterns, links them to canonical Wikipedia pages, checks Wikidata `instance of`/`subclass of` types, and exposes Wikipedia, Wikidata, DOI, university, government, and publisher references in the Concepts view. A source-backed label means the concept is documented and referenced; it is not a claim that the paper's interpretation is universally true.
 - File uploads now use a multipart `/analyze-file` endpoint for PDF, TXT, and Markdown files. This path works without internet access.
-- Scanned/image-only PDFs still need OCR; text-based PDFs are supported by `pypdf`.
+- URL ingestion prefers a discoverable PDF and reports the effective format/source in the response trace; scanned/image-only PDFs use the optional OCR fallback described above.
 - Similarity currently uses simple token overlap; embeddings should come later.
 - Analysis runs are not persisted yet.
 - Streaming progress, citations in the UI, and human review are future steps.
@@ -205,8 +220,7 @@ Invoke-RestMethod -Method Post -Uri http://localhost:8080/analyze-file -Form @{ 
 1. Connect the frontend input to `POST /analyze`.
 2. Replace `DemoResearchModel` with one provider-backed implementation.
 3. Add source-location-aware extraction and citation display.
-4. Add real `.txt`, `.md`, and PDF upload handling.
-5. Add a two-paper comparison fixture and improve relationships.
-6. Add embeddings only after the concept and relationship schema is stable.
-7. Add persistence/checkpointing and streaming progress.
-8. Measure schema pass rate, citation coverage, relevance agreement, latency, retries, and token cost.
+4. Add a two-paper comparison fixture and improve relationships.
+5. Add embeddings only after the concept and relationship schema is stable.
+6. Add persistence/checkpointing and streaming progress.
+7. Measure schema pass rate, citation coverage, relevance agreement, latency, retries, and token cost.
