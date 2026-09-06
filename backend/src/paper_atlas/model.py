@@ -1,17 +1,60 @@
 from __future__ import annotations
 
+from abc import ABC, abstractmethod
 from datetime import datetime
 import re
 from typing import Protocol
 
-from .agents import extract_named_concepts
+from .agents import (
+    ScannedDocument,
+    explain_concepts,
+    extract_named_concepts,
+    scan_text_document,
+)
 from .schemas import PaperAnalysis, PaperRecord, Relationship
 
 
 class ResearchModel(Protocol):
-    """Provider boundary. Real model calls can replace the demo implementation."""
+    """Provider boundary that adapts scanned documents for model agents."""
 
     def extract(self, text: str, source_url: str | None = None, query: str | None = None) -> PaperAnalysis:
+        scanned_documents = self.scan_documents(text)
+        return self.extract_scanned_documents(scanned_documents, source_url, query)
+
+    @staticmethod
+    def scan_documents(text: str) -> list[ScannedDocument]:
+        """Create document records for text that has already passed ingestion."""
+        return [scan_text_document(text)] if text.strip() else []
+
+    @staticmethod
+    def scanned_documents_to_text(documents: list[ScannedDocument]) -> str:
+        """Adapt scanned documents while retaining useful section line breaks."""
+        return "\n\n".join(
+            document.source_text.strip()
+            if document.source_text and document.source_text.strip()
+            else "\n\n".join(paragraph.text for paragraph in document.paragraphs)
+            for document in documents
+            if (document.source_text and document.source_text.strip()) or document.paragraphs
+        )
+
+    @staticmethod
+    def recognize_scanned_documents(documents: list[ScannedDocument]):
+        """Run the unchanged recognition agent against normalized paragraph text."""
+        return extract_named_concepts(ResearchModel.scanned_documents_to_text(documents))
+
+    @staticmethod
+    def explain_analysis(analysis: PaperAnalysis):
+        """Run the unchanged explanation agent after concepts and evidence exist."""
+        return explain_concepts(analysis.concepts, analysis.evidence)
+
+    @abstractmethod
+    def extract_scanned_documents(
+        self,
+        scanned_documents: list[ScannedDocument],
+        source_url: str | None = None,
+        query: str | None = None,
+    ) -> PaperAnalysis:
+        """Produce an analysis from normalized scanned documents."""
         ...
 
     def summarise(self, analysis: PaperAnalysis) -> tuple[str, int]:
@@ -197,10 +240,16 @@ def _evidence(
     }
 
 
-class DemoResearchModel:
+class DemoResearchModel(ResearchModel):
     """Deterministic stand-in that keeps the workflow runnable without an API key."""
 
-    def extract(self, text: str, source_url: str | None = None, query: str | None = None) -> PaperAnalysis:
+    def extract_scanned_documents(
+        self,
+        scanned_documents: list[ScannedDocument],
+        source_url: str | None = None,
+        query: str | None = None,
+    ) -> PaperAnalysis:
+        text = self.scanned_documents_to_text(scanned_documents)
         title = _first_line(text)
         year_match = re.search(r"\b(19|20)\d{2}\b", text)
         year = int(year_match.group(0)) if year_match else None
@@ -307,7 +356,7 @@ class DemoResearchModel:
         # Add only paper-specific entities that the recognition pipeline can
         # link to a documented concept; do not manufacture unsupported labels.
         structural_labels = {concept["label"].casefold() for concept in concepts}
-        for index, entity in enumerate(extract_named_concepts(text), start=1):
+        for index, entity in enumerate(self.recognize_scanned_documents(scanned_documents), start=1):
             if entity.term.casefold() in structural_labels:
                 continue
             evidence_id = f"evidence-entity-{index}"
