@@ -1,4 +1,5 @@
 import httpx
+import pytest
 
 import paper_atlas.tools.documents as documents
 
@@ -99,3 +100,53 @@ def test_scanned_pdf_uses_ocr_fallback(monkeypatch) -> None:
 
     assert result.ocr_used is True
     assert "OCR body text" in result.text
+
+
+def test_pdf_candidates_include_dynamic_data_and_script_urls() -> None:
+    html = r'''
+    <button data-pdf-url="/downloads/paper.pdf?download=1">Download</button>
+    <script type="application/json">
+      {"pdfUrl":"https:\/\/cdn.example.org\/paper.pdf"}
+    </script>
+    '''
+
+    candidates = documents._pdf_candidates(html, "https://publisher.example/article")
+
+    assert "https://publisher.example/downloads/paper.pdf?download=1" in candidates
+    assert "https://cdn.example.org/paper.pdf" in candidates
+
+
+def test_url_retries_transient_browser_error_then_uses_paper(monkeypatch) -> None:
+    page_url = "https://publisher.example/slow-paper"
+    error_response = _response(
+        page_url,
+        "text/html",
+        b"A required part of this site could not load. This may be due to a browser.",
+    )
+    good_response = _response(
+        page_url,
+        "text/html",
+        b"<article><h1>Slow paper</h1><p>The paper body loaded after a retry and remains available.</p></article>",
+    )
+    responses = iter([error_response, good_response])
+    monkeypatch.setattr(documents.httpx, "get", lambda url, **_: next(responses))
+    monkeypatch.setattr(documents.time, "sleep", lambda _: None)
+
+    result = documents.load_document_details("url", page_url, 10_000)
+
+    assert result.format == "html"
+    assert "paper body loaded after a retry" in result.text
+
+
+def test_browser_error_page_is_not_sent_to_analysis(monkeypatch) -> None:
+    page_url = "https://publisher.example/blocked-paper"
+    response = _response(
+        page_url,
+        "text/html",
+        b"<main><h1>A required part of this site couldn't load</h1><p>This may be due to a browser extension.</p></main>",
+    )
+    monkeypatch.setattr(documents.httpx, "get", lambda url, **_: response)
+    monkeypatch.setattr(documents.time, "sleep", lambda _: None)
+
+    with pytest.raises(documents.DocumentIngestionError, match="browser or JavaScript error page"):
+        documents.load_document_details("url", page_url, 10_000)

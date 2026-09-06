@@ -6,6 +6,7 @@ from html.parser import HTMLParser
 from io import BytesIO
 import os
 import re
+import time
 from urllib.parse import urljoin, urlparse
 
 import httpx
@@ -16,7 +17,27 @@ from ..schemas import DocumentChunk
 
 _MAX_DOWNLOAD_BYTES = 50 * 1024 * 1024
 _PDF_LINK_LIMIT = 8
+_URL_FETCH_ATTEMPTS = 3
+_URL_RETRY_DELAYS = (0.75, 1.5)
 _PDF_SUFFIX_RE = re.compile(r"\.pdf(?:$|[?#])", re.IGNORECASE)
+_SCRIPT_PDF_URL_RE = re.compile(
+    r"(?:https?:)?//[^\"'\\\s<>]+?\.pdf(?:[?#][^\"'\\\s<>]*)?"
+    r"|/[^\"'\\\s<>]+?\.pdf(?:[?#][^\"'\\\s<>]*)?",
+    re.IGNORECASE,
+)
+_BROWSER_ERROR_MARKERS = (
+    "a required part of this site couldn't load",
+    "a required part of this site could not load",
+    "a required part of this site couldn",
+    "this may be due to a browser",
+    "enable javascript to continue",
+    "please enable javascript",
+    "access denied",
+    "verify you are human",
+    "checking your browser",
+    "cf-chl-",
+)
+_RETRYABLE_HTTP_STATUS = {408, 425, 429, 500, 502, 503, 504}
 _STOP_SECTION_RE = re.compile(
     r"^\s*(?:\d+(?:\.\d+)*[\s.)-]+)?"
     r"(?:references|bibliography|works cited|acknowledg(?:e)?ments|"
@@ -162,6 +183,7 @@ class _PdfLinkParser(HTMLParser):
     def __init__(self) -> None:
         super().__init__(convert_charrefs=True)
         self.links: list[tuple[str, str, str]] = []
+        self._script_depth = 0
 
     def _record(self, value: str | None, signal: str, kind: str = "") -> None:
         if value and value.strip():
@@ -169,6 +191,13 @@ class _PdfLinkParser(HTMLParser):
 
     def _handle_attrs(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         values = _attrs_to_dict(attrs)
+        # Many publisher pages put the download URL on a button or a custom
+        # component instead of an ordinary <a href>. These attributes are
+        # cheap to inspect and do not require executing the page's JavaScript.
+        for attribute in ("data-pdf-url", "data-pdf", "data-download-url", "data-file-url", "data-src"):
+            value = values.get(attribute)
+            if value and (attribute != "data-src" or _PDF_SUFFIX_RE.search(value)):
+                self._record(value.replace("\\/", "/"), "data", attribute)
         if tag in {"a", "link"}:
             self._record(values.get("href"), values.get("type", ""), values.get("rel", ""))
         elif tag in {"iframe", "embed", "object", "source"}:
@@ -179,10 +208,23 @@ class _PdfLinkParser(HTMLParser):
                 self._record(values.get("content"), "meta", name)
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-        self._handle_attrs(tag.lower(), attrs)
+        tag = tag.lower()
+        self._handle_attrs(tag, attrs)
+        if tag == "script":
+            self._script_depth += 1
 
     def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         self._handle_attrs(tag.lower(), attrs)
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag.lower() == "script" and self._script_depth:
+            self._script_depth -= 1
+
+    def handle_data(self, data: str) -> None:
+        if self._script_depth <= 0:
+            return
+        for value in _SCRIPT_PDF_URL_RE.findall(data.replace("\\/", "/")):
+            self._record(value.replace("\\/", "/"), "script", "script")
 
 
 def _normalise_lines(text: str) -> list[str]:
@@ -354,20 +396,62 @@ def _response_url(response: httpx.Response, fallback: str) -> str:
     return str(getattr(response, "url", "") or fallback)
 
 
-def _fetch_url(url: str) -> httpx.Response:
-    try:
-        response = httpx.get(
-            url,
-            follow_redirects=True,
-            timeout=25.0,
-            headers={"User-Agent": "PaperAtlas/0.1 research-paper-reader"},
-        )
-        response.raise_for_status()
-    except httpx.HTTPError as exc:
-        raise DocumentIngestionError(f"Could not fetch URL: {exc}") from exc
-    if len(response.content) > _MAX_DOWNLOAD_BYTES:
-        raise DocumentIngestionError("The downloaded document is larger than the 50 MB limit")
-    return response
+def _looks_like_browser_error_page(html: str) -> bool:
+    lowered = html.casefold()
+    return any(marker in lowered for marker in _BROWSER_ERROR_MARKERS)
+
+
+def _is_html_response(response: httpx.Response) -> bool:
+    content_type = response.headers.get("content-type", "").casefold()
+    return "html" in content_type or (not content_type and not response.content.startswith(b"%PDF"))
+
+
+def _fetch_url(url: str, *, timeout: float = 25.0, attempts: int = _URL_FETCH_ATTEMPTS) -> httpx.Response:
+    """Fetch a URL with bounded retries for slow pages and transient gateways.
+
+    A normal HTTP client receives the server-rendered response; it cannot wait
+    for arbitrary browser JavaScript to create a link after the response. We
+    therefore retry transient/challenge pages, while the caller still has an
+    HTML fallback for genuine article pages.
+    """
+
+    last_error: httpx.HTTPError | None = None
+    attempt_count = max(1, attempts)
+    for attempt in range(attempt_count):
+        response: httpx.Response | None = None
+        try:
+            response = httpx.get(
+                url,
+                follow_redirects=True,
+                timeout=timeout,
+                headers={"User-Agent": "PaperAtlas/0.1 research-paper-reader"},
+            )
+            if response.status_code in _RETRYABLE_HTTP_STATUS and attempt < attempt_count - 1:
+                time.sleep(_URL_RETRY_DELAYS[min(attempt, len(_URL_RETRY_DELAYS) - 1)])
+                continue
+            response.raise_for_status()
+        except httpx.HTTPError as exc:
+            last_error = exc
+            retryable = response is None or response.status_code in _RETRYABLE_HTTP_STATUS
+            if retryable and attempt < attempt_count - 1:
+                time.sleep(_URL_RETRY_DELAYS[min(attempt, len(_URL_RETRY_DELAYS) - 1)])
+                continue
+            raise DocumentIngestionError(f"Could not fetch URL: {exc}") from exc
+
+        if len(response.content) > _MAX_DOWNLOAD_BYTES:
+            raise DocumentIngestionError("The downloaded document is larger than the 50 MB limit")
+        if (
+            _is_html_response(response)
+            and _looks_like_browser_error_page(response.text)
+            and attempt < attempt_count - 1
+        ):
+            time.sleep(_URL_RETRY_DELAYS[min(attempt, len(_URL_RETRY_DELAYS) - 1)])
+            continue
+        return response
+
+    # The loop always returns or raises, but keep a defensive error for static
+    # type checkers and any future change to the retry policy.
+    raise DocumentIngestionError(f"Could not fetch URL: {last_error or 'unknown network error'}")
 
 
 def _pdf_candidates(html: str, page_url: str) -> list[str]:
@@ -382,7 +466,7 @@ def _pdf_candidates(html: str, page_url: str) -> list[str]:
     scored: list[tuple[int, str]] = []
     seen: set[str] = set()
     for raw_url, signal, kind in parser.links:
-        candidate = urljoin(page_url, raw_url)
+        candidate = urljoin(page_url, raw_url.replace("\\/", "/"))
         parsed = urlparse(candidate)
         if parsed.scheme not in {"http", "https"} or not parsed.netloc:
             continue
@@ -392,6 +476,8 @@ def _pdf_candidates(html: str, page_url: str) -> list[str]:
         score = 0
         if "citation_pdf_url" in kind:
             score += 120
+        if "pdf" in kind.casefold():
+            score += 100
         if "application/pdf" in signal.lower():
             score += 100
         if _PDF_SUFFIX_RE.search(candidate):
@@ -411,7 +497,7 @@ def _pdf_candidates(html: str, page_url: str) -> list[str]:
 def _extract_linked_pdf(html: str, page_url: str, max_chars: int) -> DocumentRead | None:
     for candidate_url in _pdf_candidates(html, page_url):
         try:
-            response = _fetch_url(candidate_url)
+            response = _fetch_url(candidate_url, timeout=15.0, attempts=2)
         except DocumentIngestionError:
             # A page can expose stale or access-controlled PDF links. Continue
             # to the next candidate before falling back to the HTML page.
@@ -495,6 +581,11 @@ def load_document_details(source_type: str, source: str, max_chars: int) -> Docu
         linked_pdf = _extract_linked_pdf(response.text, requested_url, max_chars)
         if linked_pdf:
             return linked_pdf
+        if _looks_like_browser_error_page(response.text):
+            raise DocumentIngestionError(
+                "The website returned a browser or JavaScript error page instead of the research paper. "
+                "Wait for the page to finish loading and retry, or submit the paper's direct PDF link."
+            )
         text = _html_to_text(response.text)
         format_name = "html"
     else:

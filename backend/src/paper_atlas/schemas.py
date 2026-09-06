@@ -103,5 +103,6 @@ class AnalysisResponse(BaseModel):
     warnings: list[str] = Field(default_factory=list)
     trace: list[str] = Field(default_factory=list)
     usage: dict[str, int] = Field(default_factory=dict)
+    quality: dict[str, float] = Field(default_factory=dict)
     query: str | None = None
     query_matches: list[str] = Field(default_factory=list)

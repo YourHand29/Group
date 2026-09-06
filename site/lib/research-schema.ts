@@ -51,6 +51,7 @@ export type PaperMap = {
   relevance: number;
   nodes: MapNode[];
   explanations: ConceptExplanation[];
+  sourceUrl?: string | null;
 };
 
 export type PaperSummary = {

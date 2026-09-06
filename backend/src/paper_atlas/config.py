@@ -1,5 +1,6 @@
 from functools import lru_cache
 import os
+import tempfile
 
 from dotenv import load_dotenv
 from pydantic import BaseModel, Field
@@ -8,10 +9,12 @@ load_dotenv()
 
 
 class Settings(BaseModel):
-    model_mode: str = Field(default="demo", pattern="^(demo)$")
+    model_mode: str = Field(default="demo", pattern="^(demo|bedrock)$")
     max_retries: int = Field(default=1, ge=0, le=3)
     max_document_chars: int = Field(default=120_000, ge=1_000, le=2_000_000)
     max_chunk_chars: int = Field(default=4_000, ge=500, le=20_000)
+    max_model_input_chars: int = Field(default=100_000, ge=10_000, le=2_000_000)
+    run_store_path: str = Field(default_factory=lambda: os.path.join(tempfile.gettempdir(), "paper_atlas_runs.sqlite3"))
     frontend_origin: str = "http://localhost:3000"
     aws_profile: str | None = None
     aws_region: str = "ap-southeast-1"
@@ -25,6 +28,11 @@ def get_settings() -> Settings:
         max_retries=int(os.getenv("PAPER_ATLAS_MAX_RETRIES", "1")),
         max_document_chars=int(os.getenv("PAPER_ATLAS_MAX_DOCUMENT_CHARS", "120000")),
         max_chunk_chars=int(os.getenv("PAPER_ATLAS_MAX_CHUNK_CHARS", "4000")),
+        max_model_input_chars=int(os.getenv("PAPER_ATLAS_MAX_MODEL_INPUT_CHARS", "100000")),
+        run_store_path=os.getenv(
+            "PAPER_ATLAS_RUN_STORE_PATH",
+            os.path.join(tempfile.gettempdir(), "paper_atlas_runs.sqlite3"),
+        ),
         frontend_origin=os.getenv("PAPER_ATLAS_FRONTEND_ORIGIN", "http://localhost:3000"),
         aws_profile=os.getenv("PAPER_ATLAS_AWS_PROFILE", "paper-atlas") or None,
         aws_region=os.getenv("PAPER_ATLAS_AWS_REGION", "ap-southeast-1"),

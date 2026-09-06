@@ -1,15 +1,18 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Iterator
 
 import uvicorn
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 
 from .config import get_settings
-from .graph import run_analysis
+from .graph import run_analysis, stream_analysis
 from .schemas import AnalysisRequest, AnalysisResponse, PaperRecord
 from .tools.documents import DocumentIngestionError, extract_uploaded_file_details
+from .store import RunStore
 
 settings = get_settings()
 app = FastAPI(title="Paper Atlas Agent API", version="0.1.0")
@@ -36,6 +39,25 @@ def analyze(request: AnalysisRequest) -> AnalysisResponse:
     if response.status == "failed":
         raise HTTPException(status_code=422, detail=response.warnings or "Analysis failed")
     return response
+
+
+@app.get("/runs/{run_id}", response_model=AnalysisResponse)
+def get_run(run_id: str) -> AnalysisResponse:
+    """Retrieve a previous response without re-running the paper analysis."""
+
+    response = RunStore(settings.run_store_path).get(run_id)
+    if response is None:
+        raise HTTPException(status_code=404, detail="Analysis run was not found")
+    return response
+
+
+@app.post("/analyze/stream")
+def analyze_stream(request: AnalysisRequest) -> StreamingResponse:
+    def events() -> Iterator[str]:
+        for event in stream_analysis(request):
+            yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+
+    return StreamingResponse(events(), media_type="text/event-stream")
 
 
 @app.post("/analyze-file", response_model=AnalysisResponse)

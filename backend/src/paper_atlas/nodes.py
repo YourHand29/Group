@@ -4,10 +4,30 @@ from urllib.parse import urlparse
 
 from .agents import explain_concepts, named_entity_model_available
 from .config import Settings
-from .model import DemoResearchModel, ResearchModel, search_text
+from .model import ResearchModel, default_model as configured_default_model, search_text
 from .schemas import PaperAnalysis
 from .state import ResearchState
 from .tools.documents import DocumentIngestionError, chunk_text, load_document_details
+
+
+def _normalise_for_match(value: str) -> str:
+    """Make excerpts comparable despite PDF line wrapping and whitespace."""
+
+    return " ".join(value.casefold().replace("…", "").split())
+
+
+def _evidence_is_anchored(excerpt: str, source_text: str) -> bool:
+    source = _normalise_for_match(source_text)
+    candidate = _normalise_for_match(excerpt)
+    if not candidate:
+        return False
+    if candidate in source:
+        return True
+    # Long excerpts are deliberately shortened for the UI. Their retained
+    # prefix remains a valid citation anchor even when the ellipsis is absent
+    # from the source text.
+    prefix = candidate[:180].rsplit(" ", 1)[0].strip()
+    return len(prefix) >= 40 and prefix in source
 
 
 def validate_input(state: ResearchState) -> dict:
@@ -74,9 +94,24 @@ def validate_output(state: ResearchState) -> dict:
     try:
         analysis = PaperAnalysis.model_validate(state["paper"])
         evidence_ids = {item.id for item in analysis.evidence}
+        concept_ids = {concept.id for concept in analysis.concepts}
+        if len(evidence_ids) != len(analysis.evidence):
+            raise ValueError("evidence IDs must be unique")
+        if len(concept_ids) != len(analysis.concepts):
+            raise ValueError("concept IDs must be unique")
         missing = sorted({evidence_id for concept in analysis.concepts for evidence_id in concept.evidence_ids if evidence_id not in evidence_ids})
         if missing:
             raise ValueError(f"concepts reference missing evidence: {', '.join(missing)}")
+        unlinked = sorted(concept.id for concept in analysis.concepts if not concept.evidence_ids)
+        if unlinked:
+            raise ValueError(f"concepts without evidence: {', '.join(unlinked)}")
+        unanchored = sorted(
+            item.id
+            for item in analysis.evidence
+            if not _evidence_is_anchored(item.excerpt, state.get("raw_text", ""))
+        )
+        if unanchored:
+            raise ValueError(f"evidence excerpts not found in the ingested paper text: {', '.join(unanchored)}")
         return {"errors": [], "status": "validated", "trace": ["Structured output passed validation"]}
     except (KeyError, ValueError, TypeError) as exc:
         retry_count = state.get("retry_count", 0) + 1
@@ -129,5 +164,5 @@ def route_after_validation(state: ResearchState) -> str:
     return "fail"
 
 
-def default_model() -> ResearchModel:
-    return DemoResearchModel()
+def default_model(settings: Settings | None = None) -> ResearchModel:
+    return configured_default_model(settings)

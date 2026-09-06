@@ -1,6 +1,8 @@
 from paper_atlas.agents import ScannedDocument
 from paper_atlas.model import ResearchModel
+from paper_atlas.model import DemoResearchModel
 from paper_atlas.graph import run_analysis
+from paper_atlas.nodes import validate_output
 from paper_atlas.schemas import AnalysisRequest, PaperRecord
 
 
@@ -17,6 +19,9 @@ def test_analysis_workflow_returns_validated_map(monkeypatch) -> None:
     assert len(response.concepts) == 5
     assert len(response.evidence) >= 3
     assert response.relationships[0].relationship_type == "similar"
+    assert response.quality["schema_valid"] == 1
+    assert response.quality["citation_coverage"] == 1
+    assert response.usage["chunk_count"] == 1
     assert any("validated" in step.lower() for step in response.trace)
 
 
@@ -37,3 +42,51 @@ def test_scanned_document_adapter_preserves_paragraph_order() -> None:
     })
 
     assert ResearchModel.scanned_documents_to_text([document]) == "First paragraph.\n\nSecond paragraph."
+
+
+def test_validation_rejects_evidence_that_is_not_in_the_ingested_text() -> None:
+    state = {
+        "paper": {
+            "metadata": {"title": "Test paper"},
+            "thesis": "The paper makes a claim.",
+            "plain_language_summary": "A short summary.",
+            "relevance": 50,
+            "concepts": [{
+                "id": "concept-1",
+                "label": "Claim",
+                "kind": "thesis",
+                "description": "The main claim.",
+                "evidence_ids": ["evidence-1"],
+                "confidence": 0.8,
+            }],
+            "evidence": [{
+                "id": "evidence-1",
+                "claim": "The source supports the claim.",
+                "kind": "quote",
+                "excerpt": "This sentence was invented by the model.",
+                "source_location": "opening text",
+                "confidence": 0.8,
+            }],
+        },
+        "raw_text": "The actual paper sentence is different.",
+        "retry_count": 0,
+        "max_retries": 0,
+    }
+
+    result = validate_output(state)
+
+    assert result["status"] == "failed"
+    assert "not found in the ingested paper text" in result["errors"][0]
+
+
+def test_comparison_uses_explicit_extension_language_when_supported() -> None:
+    analysis = DemoResearchModel().extract(
+        "A method extends prior attention work and evaluates the approach on a benchmark."
+    )
+    relationships = DemoResearchModel().compare(
+        analysis,
+        [PaperRecord(id="paper-old", title="Prior attention work", concepts=["attention"])],
+    )
+
+    assert relationships
+    assert relationships[0].relationship_type == "extends"

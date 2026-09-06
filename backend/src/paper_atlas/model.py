@@ -2,8 +2,9 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from datetime import datetime
+import json
 import re
-from typing import Protocol
+from typing import Any, Protocol
 
 from .agents import (
     ScannedDocument,
@@ -11,6 +12,7 @@ from .agents import (
     extract_named_concepts,
     scan_text_document,
 )
+from .config import Settings
 from .schemas import PaperAnalysis, PaperRecord, Relationship
 
 
@@ -106,6 +108,11 @@ _METHOD_CUES = ("propose", "present", "introduce", "develop", "design", "use", "
 _FINDING_CUES = ("show", "find", "demonstrat", "achiev", "improv", "outperform", "increase", "decrease", "reduce", "result")
 _EXPERIMENT_CUES = ("evaluat", "experiment", "benchmark", "dataset", "corpus", "participants", "test", "trained on", "measured on")
 _METRIC_CUES = ("accuracy", "precision", "recall", "f1", "auc", "bleu", "rouge", "score", "error", "loss", "latency", "runtime", "reduction", "improvement", "significant")
+_COMPARISON_STOPWORDS = {
+    "about", "after", "against", "also", "been", "being", "between", "from", "have", "into",
+    "more", "most", "only", "over", "paper", "propose", "proposed", "research", "shows", "that",
+    "their", "there", "these", "they", "this", "using", "with", "which", "will",
+}
 
 
 def _compact_text(value: str, limit: int = 280) -> str:
@@ -209,6 +216,52 @@ def _label_from_sentence(sentence: str, cues: tuple[str, ...], fallback: str) ->
     return sentence.rstrip(".") or fallback
 
 
+def _source_location(text: str, excerpt: str, section: str) -> str:
+    """Return a useful, stable location in the filtered paper body."""
+
+    clean_excerpt = " ".join(excerpt.split()).casefold()
+    line = None
+    if clean_excerpt:
+        words = clean_excerpt.split()
+        signatures = (" ".join(words[:8]), " ".join(words[:4]))
+        for line_number, raw_line in enumerate(text.splitlines(), start=1):
+            normalized_line = " ".join(raw_line.split()).casefold()
+            if any(signature and signature in normalized_line for signature in signatures):
+                line = line_number
+                break
+    location = f"{section.title()} section"
+    if line is not None:
+        location += f", line {line}"
+    else:
+        location += ", filtered paper text"
+    return location
+
+
+def _offset_location(text: str, offset: int, section: str | None = None) -> str:
+    safe_offset = max(0, min(offset, len(text)))
+    line = text.count("\n", 0, safe_offset) + 1
+    return f"{section.title() + ' section, ' if section else ''}line {line} (character {safe_offset})"
+
+
+def _comparison_terms(value: str) -> set[str]:
+    return {
+        term
+        for term in re.findall(r"[a-z][a-z0-9-]{3,}", value.casefold())
+        if term not in _COMPARISON_STOPWORDS
+    }
+
+
+def _comparison_relationship(current_text: str) -> str:
+    lowered = current_text.casefold()
+    if re.search(r"\b(?:contradict|challenge|disagree|fails? to|cannot|worse than)\b", lowered):
+        return "contradicts"
+    if re.search(r"\b(?:extend|extends|build(?:s)? on|adapt(?:s)?|improve(?:s)? on)\b", lowered):
+        return "extends"
+    if re.search(r"\b(?:support(?:s)?|confirm(?:s)?|consistent with|agree(?:s)? with)\b", lowered):
+        return "supports"
+    return "similar"
+
+
 def _experiment_label(sentence: str) -> str:
     """Prefer the named dataset, benchmark, task, or sample in an evaluation sentence."""
 
@@ -228,6 +281,7 @@ def _evidence(
     kind: str,
     fallback: str,
     confidence: float,
+    paper_text: str,
 ) -> dict[str, object]:
     sentence, section = source or (fallback, "paper text")
     return {
@@ -235,7 +289,11 @@ def _evidence(
         "claim": claim,
         "kind": kind,
         "excerpt": _compact_text(sentence, 420),
-        "source_location": f"{section.title()} section" if section != "opening" else "opening text",
+        "source_location": _source_location(
+            paper_text,
+            sentence,
+            "opening text" if section == "opening" else section,
+        ),
         "confidence": confidence,
     }
 
@@ -309,6 +367,7 @@ class DemoResearchModel(ResearchModel):
                 "context",
                 text,
                 0.84,
+                text,
             ),
             _evidence(
                 "evidence-method",
@@ -317,6 +376,7 @@ class DemoResearchModel(ResearchModel):
                 "experiment",
                 text,
                 0.80,
+                text,
             ),
             _evidence(
                 "evidence-finding",
@@ -325,6 +385,7 @@ class DemoResearchModel(ResearchModel):
                 "statistic",
                 text,
                 0.78,
+                text,
             ),
             _evidence(
                 "evidence-experiment",
@@ -333,6 +394,7 @@ class DemoResearchModel(ResearchModel):
                 "dataset",
                 text,
                 0.76,
+                text,
             ),
             _evidence(
                 "evidence-metric",
@@ -341,10 +403,12 @@ class DemoResearchModel(ResearchModel):
                 "statistic",
                 text,
                 0.73,
+                text,
             ),
         ]
         if query_matches:
-            evidence.append({"id": "evidence-query", "claim": f"The requested concept '{query.strip()}' appears in the extracted paper text.", "kind": "quote", "excerpt": query_matches[0], "source_location": "query match", "confidence": 0.9})
+            query_position = text.casefold().find(query.strip().casefold())
+            evidence.append({"id": "evidence-query", "claim": f"The requested concept '{query.strip()}' appears in the extracted paper text.", "kind": "quote", "excerpt": query_matches[0], "source_location": _offset_location(text, query_position if query_position >= 0 else 0, "query match"), "confidence": 0.9})
         concepts = [
             {"id": "thesis", "label": title[:72], "kind": "thesis", "description": thesis, "evidence_ids": ["evidence-context"], "confidence": 0.84, "recognition_status": "structural"},
             {"id": "method", "label": method_label, "kind": "method", "description": method_source[0] if method_source else "The paper does not expose a clear method section in the extracted text.", "evidence_ids": ["evidence-method"], "confidence": 0.80, "recognition_status": "structural"},
@@ -365,7 +429,7 @@ class DemoResearchModel(ResearchModel):
                 "claim": f"The paper mentions {entity.term}.",
                 "kind": "quote",
                 "excerpt": entity.excerpt,
-                "source_location": f"character {entity.start_char}",
+                "source_location": _offset_location(text, entity.start_char),
                 "confidence": 0.72,
             })
             concepts.append({
@@ -405,19 +469,216 @@ class DemoResearchModel(ResearchModel):
         return summary, analysis.relevance
 
     def compare(self, analysis: PaperAnalysis, existing_papers: list[PaperRecord]) -> list[Relationship]:
-        current_terms = set(re.findall(r"[a-z]{4,}", " ".join([analysis.metadata.title, analysis.thesis, *(concept.label for concept in analysis.concepts)]).lower()))
+        current_text = " ".join([
+            analysis.metadata.title,
+            analysis.thesis,
+            analysis.plain_language_summary,
+            *(concept.label for concept in analysis.concepts),
+            *(concept.description for concept in analysis.concepts),
+        ])
+        current_terms = _comparison_terms(current_text)
+        relationship_type = _comparison_relationship(current_text)
         relationships: list[Relationship] = []
         for paper in existing_papers:
-            other_terms = set(re.findall(r"[a-z]{4,}", " ".join([paper.title, paper.abstract or "", *paper.concepts]).lower()))
+            other_text = " ".join([paper.title, paper.abstract or "", *paper.concepts])
+            other_terms = _comparison_terms(other_text)
             overlap = current_terms & other_terms
             if overlap:
-                confidence = min(0.95, 0.5 + len(overlap) * 0.08)
+                union = current_terms | other_terms
+                overlap_ratio = len(overlap) / max(1, len(union))
+                confidence = min(0.95, 0.48 + overlap_ratio * 0.9 + min(len(overlap), 4) * 0.04)
                 relationships.append(Relationship(
                     source_id="current-paper",
                     target_id=paper.id,
-                    relationship_type="similar",
-                    explanation=f"Shared concepts: {', '.join(sorted(overlap)[:5])}.",
+                    relationship_type=relationship_type,
+                    explanation=(
+                        f"Shared paper terms: {', '.join(sorted(overlap)[:6])}. "
+                        f"The current paper explicitly appears to {relationship_type} the earlier work based on its extracted claims; verify in the cited evidence."
+                    ),
                     confidence=confidence,
                     paper_ids=[paper.id],
                 ))
         return relationships
+
+
+def _json_from_model_output(output: str) -> dict[str, Any]:
+    """Parse a JSON object from a provider response, including code fences."""
+
+    cleaned = output.strip()
+    fenced = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", cleaned, re.IGNORECASE | re.DOTALL)
+    if fenced:
+        cleaned = fenced.group(1)
+    try:
+        payload = json.loads(cleaned)
+    except json.JSONDecodeError:
+        decoder = json.JSONDecoder()
+        for start, character in enumerate(cleaned):
+            if character != "{":
+                continue
+            try:
+                payload, _ = decoder.raw_decode(cleaned[start:])
+                break
+            except json.JSONDecodeError:
+                continue
+        else:
+            raise ValueError("The model did not return a JSON object")
+    if not isinstance(payload, dict):
+        raise ValueError("The model returned JSON, but it was not an object")
+    return payload
+
+
+def _provider_text(payload: dict[str, Any]) -> str:
+    """Read common Bedrock response shapes without coupling agents to a model."""
+
+    content = payload.get("content")
+    if isinstance(content, list):
+        text = "".join(
+            str(block.get("text", ""))
+            for block in content
+            if isinstance(block, dict) and block.get("text")
+        )
+        if text:
+            return text
+    output = payload.get("output")
+    if isinstance(output, dict):
+        message = output.get("message")
+        if isinstance(message, dict):
+            message_content = message.get("content")
+            if isinstance(message_content, list):
+                text = "".join(
+                    str(block.get("text", ""))
+                    for block in message_content
+                    if isinstance(block, dict) and block.get("text")
+                )
+                if text:
+                    return text
+    for key in ("completion", "generation", "outputText"):
+        if isinstance(payload.get(key), str):
+            return payload[key]
+    results = payload.get("results")
+    if isinstance(results, list) and results and isinstance(results[0], dict):
+        for key in ("text", "outputText", "generation"):
+            if isinstance(results[0].get(key), str):
+                return results[0][key]
+    raise ValueError("The Bedrock model returned no readable text")
+
+
+def _analysis_prompt(text: str, source_url: str | None, query: str | None) -> str:
+    query_instruction = (
+        f"The user's optional focus is: {query.strip()}\nPrioritize that focus only when it is supported by the paper.\n"
+        if query and query.strip()
+        else "There is no additional user focus; analyze the paper independently.\n"
+    )
+    return f"""You are the research-paper analysis agent for Paper Atlas.
+
+Analyze only the PAPER BODY below. It has already been filtered to remove browser chrome,
+publisher navigation, repeated headers/footers, and references. Do not use outside facts to
+invent claims. Return one JSON object and no prose outside it.
+
+{query_instruction}
+Every evidence.excerpt must be copied from the PAPER BODY (whitespace may be normalized),
+and every concept must link to at least one evidence id. Use concrete names, measurements,
+datasets, methods, and outcomes from the paper. Prefer a precise claim over a generic label.
+The `concept` kind is for a named scientific idea, law, theory, method, dataset, or entity;
+only use it when the term appears in the paper. Use one of the allowed kinds exactly:
+thesis, method, finding, experiment, metric, concept.
+Use evidence kinds exactly: statistic, experiment, quote, dataset, context.
+
+The output must satisfy this shape:
+{{
+  "metadata": {{"title": "...", "authors": ["..."], "year": 2024, "source_url": {json.dumps(source_url)}}},
+  "thesis": "one concrete central claim",
+  "plain_language_summary": "short but specific summary",
+  "relevance": 0,
+  "concepts": [{{"id":"...","label":"...","kind":"...","description":"...","evidence_ids":["..."],"confidence":0.0}}],
+  "evidence": [{{"id":"...","claim":"...","kind":"...","excerpt":"verbatim source sentence","source_location":"section or page if known","confidence":0.0}}]
+}}
+
+PAPER BODY:
+{text}
+"""
+
+
+class BedrockResearchModel(DemoResearchModel):
+    """Optional provider-backed extractor using the AWS Bedrock runtime.
+
+    The deterministic summarisation and comparison agents remain available so
+    the provider is responsible only for the part that benefits most from a
+    language model: extracting paper-specific claims and evidence.
+    """
+
+    def __init__(self, settings: Settings) -> None:
+        if not settings.bedrock_model_id.strip():
+            raise RuntimeError(
+                "PAPER_ATLAS_BEDROCK_MODEL_ID must be set when PAPER_ATLAS_MODEL_MODE=bedrock"
+            )
+        self.settings = settings
+
+    def _invoke(self, prompt: str) -> str:
+        try:
+            import boto3
+        except ImportError as exc:  # pragma: no cover - dependency is optional at runtime
+            raise RuntimeError("Bedrock mode requires boto3; install the backend dependencies first") from exc
+
+        try:
+            session = boto3.Session(profile_name=self.settings.aws_profile, region_name=self.settings.aws_region)
+            client = session.client("bedrock-runtime")
+            model_id = self.settings.bedrock_model_id
+            lowered = model_id.casefold()
+            if "anthropic" in lowered:
+                body: dict[str, Any] = {
+                    "anthropic_version": "bedrock-2023-05-31",
+                    "max_tokens": 6000,
+                    "temperature": 0,
+                    "messages": [{"role": "user", "content": [{"type": "text", "text": prompt}]}],
+                }
+            elif "amazon.nova" in lowered:
+                body = {
+                    "schemaVersion": "messages-v1",
+                    "inferenceConfig": {"maxTokens": 6000, "temperature": 0},
+                    "messages": [{"role": "user", "content": [{"text": prompt}]}],
+                }
+            else:
+                # This covers legacy text-completion providers such as Titan
+                # and Cohere. Unsupported models return a clear provider error.
+                body = {"prompt": prompt, "max_tokens_to_sample": 6000, "temperature": 0}
+            response = client.invoke_model(
+                modelId=model_id,
+                body=json.dumps(body),
+                contentType="application/json",
+                accept="application/json",
+            )
+            raw_body = response.get("body")
+            raw = raw_body.read() if hasattr(raw_body, "read") else raw_body
+            payload = json.loads(raw.decode("utf-8") if isinstance(raw, bytes) else raw)
+            if not isinstance(payload, dict):
+                raise ValueError("The Bedrock response body was not a JSON object")
+            return _provider_text(payload)
+        except Exception as exc:
+            raise RuntimeError(f"Bedrock analysis failed: {exc}") from exc
+
+    def extract_scanned_documents(
+        self,
+        scanned_documents: list[ScannedDocument],
+        source_url: str | None = None,
+        query: str | None = None,
+    ) -> PaperAnalysis:
+        text = self.scanned_documents_to_text(scanned_documents)
+        if not text.strip():
+            raise ValueError("The scanned paper body is empty")
+        bounded_text = text[: self.settings.max_model_input_chars]
+        payload = _json_from_model_output(self._invoke(_analysis_prompt(bounded_text, source_url, query)))
+        analysis = PaperAnalysis.model_validate(payload)
+        if source_url and analysis.metadata.source_url is None:
+            analysis = analysis.model_copy(
+                update={"metadata": analysis.metadata.model_copy(update={"source_url": source_url})}
+            )
+        return analysis
+
+
+def default_model(settings: Settings | None = None) -> ResearchModel:
+    """Select the configured provider while keeping local setup zero-config."""
+
+    if settings and settings.model_mode == "bedrock" and settings.bedrock_model_id.strip():
+        return BedrockResearchModel(settings)
+    return DemoResearchModel()

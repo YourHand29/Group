@@ -5,7 +5,7 @@ import cytoscape from 'cytoscape';
 import type { ConceptExplanation, MapNode, PaperMap, PaperSummary } from '../lib/research-schema';
 import { demoMap, demoPapers } from '../lib/research-orchestrator';
 
-type ViewMode = 'map' | 'evidence' | 'notes' | 'concepts';
+type ViewMode = 'map' | 'concepts';
 const BACKEND_URL = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:8080';
 
 type BackendConcept = {
@@ -54,7 +54,24 @@ type BackendAnalysisResponse = {
   trace: string[];
   query: string | null;
   query_matches: string[];
+  document_format?: 'pdf' | 'html' | 'text' | string;
+  ocr_used?: boolean;
 };
+
+async function fetchWithTimeout(input: RequestInfo | URL, init: RequestInit, timeoutMs = 180_000): Promise<Response> {
+  const controller = new AbortController();
+  const timeout = window.setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(input, { ...init, signal: controller.signal });
+  } catch (error) {
+    if (error instanceof DOMException && error.name === 'AbortError') {
+      throw new Error('The source took too long to load. The server retries slow pages, but this site may require a direct research-paper PDF link.');
+    }
+    throw error;
+  } finally {
+    window.clearTimeout(timeout);
+  }
+}
 
 function formatErrorDetail(detail: unknown): string {
   if (typeof detail === 'string' && detail.trim()) return detail;
@@ -78,12 +95,7 @@ function formatErrorDetail(detail: unknown): string {
   return 'The analysis service rejected this paper.';
 }
 
-const viewLabels: Record<ViewMode, string> = {
-  map: 'Map',
-  evidence: 'Evidence',
-  notes: 'Notes',
-  concepts: 'Concepts',
-};
+const viewLabels: Record<ViewMode, string> = { map: 'Map', concepts: 'Concepts' };
 
 const freshMap: PaperMap = {
   title: 'Preparing a new paper map',
@@ -505,8 +517,8 @@ export default function Home() {
     setRelationshipSummary('This map is independent and has no previous-paper context.');
     setIsAnalyzing(true);
     setErrorMessage(null);
-    setStatus('Starting a fresh paper analysis…');
-    try {
+     setStatus(selectedFile ? 'Reading the uploaded paper…' : 'Checking the page for a research-paper PDF…');
+     try {
       const existingPapers: Array<{ id: string; title: string; concepts: string[] }> = [];
       const response = selectedFile
         ? await (() => {
@@ -514,9 +526,9 @@ export default function Home() {
             formData.append('file', selectedFile);
             formData.append('existing_papers', JSON.stringify(existingPapers));
             formData.append('instruction', paperInput.trim());
-            return fetch(`${BACKEND_URL}/analyze-file`, { method: 'POST', body: formData });
-          })()
-        : await fetch(`${BACKEND_URL}/analyze`, {
+             return fetchWithTimeout(`${BACKEND_URL}/analyze-file`, { method: 'POST', body: formData });
+           })()
+        : await fetchWithTimeout(`${BACKEND_URL}/analyze`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
@@ -536,6 +548,7 @@ export default function Home() {
         summary: result.summary,
         relevance: result.relevance,
         nodes: result.concepts.map((concept) => ({ id: concept.id, kind: concept.kind, label: concept.label, detail: concept.description })),
+        sourceUrl: result.paper.source_url,
         explanations: result.concept_explanations?.length
           ? result.concept_explanations.map(toConceptExplanation)
           : result.concepts.map(fallbackExplanation),
@@ -561,7 +574,12 @@ export default function Home() {
           ? ` · Found ${result.query_matches.length} text match${result.query_matches.length === 1 ? '' : 'es'} for “${result.query}”`
           : ` · No exact text match for “${result.query}”; map still generated`
         : '';
-      setStatus(`Map ready · ${result.concepts.length} concepts connected${queryStatus}`);
+      const sourceStatus = result.document_format === 'pdf'
+        ? ` · PDF source${result.ocr_used ? ' read with OCR' : ''}`
+        : result.document_format === 'html'
+          ? ' · website article text'
+          : '';
+      setStatus(`Map ready · ${result.concepts.length} concepts connected${sourceStatus}${queryStatus}`);
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Could not reach the analysis service';
       setStatus('Analysis failed');
@@ -583,38 +601,21 @@ export default function Home() {
   return (
     <main className="atlas-shell">
       {errorMessage ? <ErrorDialog message={errorMessage} onDismiss={() => setErrorMessage(null)} /> : null}
-      <aside className="sidebar">
+       <aside className="sidebar">
         <div className="brand-lockup">
           <span className="brand-mark"><i /><i /><i /></span>
           <span>paper<span className="brand-slash">/</span>atlas</span>
         </div>
 
-        <div className="sidebar-section">
-          <span className="sidebar-label">Workspace</span>
-          <nav className="side-nav" aria-label="Workspace navigation">
-            <button className="side-nav-item side-nav-item-active" type="button"><span>◈</span> Overview</button>
-            <button className="side-nav-item" type="button"><span>⌘</span> Collections <em>3</em></button>
-            <button className="side-nav-item" type="button"><span>↗</span> Connections</button>
-          </nav>
-        </div>
-
-        <div className="sidebar-section sidebar-library">
-          <div className="sidebar-label-row"><span className="sidebar-label">Recent maps</span><button type="button" aria-label="Add recent map">+</button></div>
-          <button type="button" className="recent-map recent-map-active"><span className="recent-dot" />Transformer architectures <small>now</small></button>
-          <button type="button" className="recent-map"><span className="recent-dot recent-dot-lilac" />Climate adaptation <small>yesterday</small></button>
-          <button type="button" className="recent-map"><span className="recent-dot recent-dot-amber" />Synthetic biology <small>Aug 28</small></button>
-        </div>
-
         <div className="sidebar-footer">
-          <div className="model-status"><span className="status-pulse" /><span><strong>AI schema online</strong><small>Local-first runtime</small></span></div>
-          <div className="user-chip"><span className="avatar">JS</span><span>Jordan Smith</span><span className="user-chevron">⌄</span></div>
+          <div className="model-status"><span className="status-pulse" /><span><strong>Analysis ready</strong><small>PDF and website sources supported</small></span></div>
         </div>
       </aside>
 
       <section className="workspace">
         <header className="topbar">
-          <div className="breadcrumb"><span>Workspace</span><b>/</b><strong>Transformer architectures</strong></div>
-          <div className="topbar-actions"><span className="sync-label"><span className="sync-dot" /> Autosaved</span><button type="button" className="icon-button" aria-label="Search">⌕</button><button type="button" className="help-button">?</button></div>
+          <div className="breadcrumb"><span>Workspace</span><b>/</b><strong>{map.nodes.length ? map.title : 'New analysis'}</strong></div>
+          <div className="topbar-actions"><span className="sync-label"><span className="sync-dot" /> Ready</span></div>
         </header>
 
         <div className="workspace-content">
@@ -624,7 +625,7 @@ export default function Home() {
               <h1>See the shape<br /><em>of an idea.</em></h1>
               <p className="intro-copy">Turn dense research into a visual signal map.<br className="desktop-break" /> Find the paper that is worth your next deep read.</p>
             </div>
-            <div className="intro-actions"><button type="button" className="text-button">Tour the workspace <span>↗</span></button><button type="button" className="primary-button" onClick={() => document.getElementById('paper-input')?.focus()}><span>+</span> Add paper</button></div>
+            <div className="intro-actions"><button type="button" className="primary-button" onClick={() => document.getElementById('paper-input')?.focus()}><span>+</span> Add paper</button></div>
           </div>
 
           <section className="ingest-card" aria-label="Add a research paper">
@@ -635,19 +636,19 @@ export default function Home() {
 
           <div className="signal-grid">
             <section className="map-card" aria-label="Research concept map">
-              <div className="map-card-head"><div><span className="card-eyebrow">RESPONSE <span>02</span></span><h2>Concept map</h2></div><div className="map-head-actions"><span className="confidence-pill"><i /> {map.relevance}% relevance</span><button type="button" className="small-icon-button" aria-label="More map options">···</button></div></div>
-              <div className="map-toolbar"><div className="view-tabs" role="tablist" aria-label="Map views">{(['map', 'evidence', 'notes', 'concepts'] as ViewMode[]).map((view) => <button key={view} type="button" role="tab" aria-selected={viewMode === view} className={viewMode === view ? 'view-tab-active' : ''} onClick={() => setViewMode(view)}>{viewLabels[view]}</button>)}</div><span className="map-toolbar-label"><span className="legend-dot legend-dot-teal" /> Core idea <span className="legend-dot legend-dot-coral" /> Signal</span></div>
-              {viewMode === 'map' ? <CytoscapeMap nodes={map.nodes} selectedNode={selectedNode} onSelect={setSelectedNode} /> : viewMode === 'concepts' ? <ConceptsView explanations={map.explanations} expandedConceptId={expandedConceptId} onToggle={(conceptId) => { setSelectedNode(conceptId); setExpandedConceptId((current) => current === conceptId ? null : conceptId); }} /> : <div className="alternate-view"><span className="alternate-icon">{viewMode === 'evidence' ? '◒' : '✦'}</span><h3>{viewMode === 'evidence' ? 'Evidence is clustered around one claim' : 'Notes layer coming into focus'}</h3><p>{viewMode === 'evidence' ? 'The strongest support is the 41% reduction in training cost across three benchmark datasets.' : 'Save your reactions beside any concept as you compare papers.'}</p><button type="button" className="secondary-button" onClick={() => setViewMode('map')}>Back to map</button></div>}
+              <div className="map-card-head"><div><span className="card-eyebrow">RESPONSE <span>02</span></span><h2>Concept map</h2></div><div className="map-head-actions"><span className="confidence-pill"><i /> {map.relevance}% relevance</span></div></div>
+              <div className="map-toolbar"><div className="view-tabs" role="tablist" aria-label="Map views">{(['map', 'concepts'] as ViewMode[]).map((view) => <button key={view} type="button" role="tab" aria-selected={viewMode === view} className={viewMode === view ? 'view-tab-active' : ''} onClick={() => setViewMode(view)}>{viewLabels[view]}</button>)}</div><span className="map-toolbar-label"><span className="legend-dot legend-dot-teal" /> Core idea <span className="legend-dot legend-dot-coral" /> Signal</span></div>
+              {viewMode === 'map' ? <CytoscapeMap nodes={map.nodes} selectedNode={selectedNode} onSelect={setSelectedNode} /> : <ConceptsView explanations={map.explanations} expandedConceptId={expandedConceptId} onToggle={(conceptId) => { setSelectedNode(conceptId); setExpandedConceptId((current) => current === conceptId ? null : conceptId); }} />}
               <div className="map-card-foot"><span><b>{map.nodes.length}</b> concepts</span><span><b>{relationshipCount}</b> relationships</span><span><b>{evidenceCount}</b> evidence signals</span><span className="map-updated">Updated just now <i /></span></div>
             </section>
 
             <aside className="insight-column">
-              <section className="insight-card insight-card-primary"><div className="insight-head"><span className="card-eyebrow">SIGNAL <span>03</span></span><span className="signal-badge">Strong signal</span></div><h2>{map.title}</h2><p>{map.summary}</p><div className="insight-divider" /><div className="selected-node"><span className="selected-node-label">Selected concept</span><strong>{selectedNodeData.label}</strong><span>{selectedNodeData.detail}</span></div><div className="confidence-row"><span>Relevance to your workspace</span><strong>{map.relevance}%</strong></div><div className="progress-track"><span style={{ width: `${map.relevance}%` }} /></div><button type="button" className="outline-button">Open source <span>↗</span></button></section>
-              <section className="insight-card connection-card"><div className="connection-orbit"><span className="orbit-core">{relationshipCount}</span><span className="orbit-dot orbit-dot-one" /><span className="orbit-dot orbit-dot-two" /></div><div><span className="card-eyebrow">CONNECTION</span><h3>{relationshipCount ? 'Shared research patterns' : 'No strong overlap yet'}</h3><p>{relationshipSummary}</p><button type="button" className="text-button text-button-small" onClick={() => setActivePaper('paper-02')}>Explore overlap <span>→</span></button></div></section>
+              <section className="insight-card insight-card-primary"><div className="insight-head"><span className="card-eyebrow">SIGNAL <span>03</span></span><span className="signal-badge">Strong signal</span></div><h2>{map.title}</h2><p>{map.summary}</p><div className="insight-divider" /><div className="selected-node"><span className="selected-node-label">Selected concept</span><strong>{selectedNodeData.label}</strong><span>{selectedNodeData.detail}</span></div><div className="confidence-row"><span>Relevance to your workspace</span><strong>{map.relevance}%</strong></div><div className="progress-track"><span style={{ width: `${map.relevance}%` }} /></div>{map.sourceUrl ? <a className="outline-button" href={map.sourceUrl} target="_blank" rel="noreferrer">Open source <span>↗</span></a> : null}</section>
+              <section className="insight-card connection-card"><div className="connection-orbit"><span className="orbit-core">{relationshipCount}</span><span className="orbit-dot orbit-dot-one" /><span className="orbit-dot orbit-dot-two" /></div><div><span className="card-eyebrow">CONNECTION</span><h3>{relationshipCount ? 'Shared research patterns' : 'No strong overlap yet'}</h3><p>{relationshipSummary}</p></div></section>
             </aside>
           </div>
 
-          <section className="paper-section"><div className="section-heading"><div><span className="card-eyebrow">LIBRARY <span>04</span></span><h2>Papers in this workspace</h2></div><button type="button" className="text-button">View all <span>→</span></button></div><div className="paper-grid">{papers.slice(0, 3).map((paper) => <PaperCard key={paper.id} paper={paper} active={activePaper === paper.id} onClick={() => setActivePaper(paper.id)} />)}<button type="button" className="add-paper-card" onClick={() => document.getElementById('paper-input')?.focus()}><span>+</span><strong>Add another paper</strong><small>Compare ideas across a collection</small></button></div></section>
+          <section className="paper-section"><div className="section-heading"><div><span className="card-eyebrow">LIBRARY <span>04</span></span><h2>Papers in this workspace</h2></div></div><div className="paper-grid">{papers.map((paper) => <PaperCard key={paper.id} paper={paper} active={activePaper === paper.id} onClick={() => setActivePaper(paper.id)} />)}<button type="button" className="add-paper-card" onClick={() => document.getElementById('paper-input')?.focus()}><span>+</span><strong>Add another paper</strong><small>Analyze another source</small></button></div></section>
         </div>
       </section>
     </main>

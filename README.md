@@ -37,12 +37,12 @@ Group/
    │  ├─ api.py                  # FastAPI /health and /analyze endpoints
    │  ├─ config.py               # Environment-backed settings
    │  ├─ graph.py                # LangGraph workflow and response adapter
-   │  ├─ model.py                # Model provider boundary and demo model
+   │  ├─ model.py                # Model provider boundary, demo, and Bedrock adapter
    │  ├─ nodes.py                # Workflow node functions and routing
    │  ├─ schemas.py              # Pydantic request, state payload, and output models
    │  ├─ state.py                # Shared LangGraph state definition
    │  └─ tools/documents.py      # URL/text/PDF ingestion and chunking
-   └─ tests/test_graph.py        # Backbone smoke tests
+   └─ tests/                     # Workflow, ingestion, OCR, and agent tests
 ```
 
 ## AWS authentication for the team
@@ -191,7 +191,7 @@ Invoke-RestMethod -Method Post -Uri http://localhost:8080/analyze-file -Form @{ 
 
 ### Paper text extraction and OCR
 
-When a user submits an HTTP(S) paper page, the backend first checks the page for a publisher or repository PDF link (`citation_pdf_url`, PDF links, embeds, and alternate PDF links). If a readable PDF is found, its URL becomes the effective paper source. Only when no usable PDF is available does the backend fall back to the article-content portion of the HTML page.
+When a user submits an HTTP(S) paper page, the backend first checks the page for a publisher or repository PDF link (`citation_pdf_url`, PDF links, embeds, alternate PDF links, download-data attributes, and PDF URLs in page JSON). If a readable PDF is found, its URL becomes the effective paper source. Only when no usable PDF is available does the backend fall back to the article-content portion of the HTML page. The fetcher retries transient server responses and browser/challenge pages a bounded number of times. It does not execute arbitrary JavaScript; if a site only creates its PDF link after browser rendering, submit the direct PDF URL when possible.
 
 PDF extraction removes repeated page headers and footers, publication boilerplate, page numbers, and sections after the main paper body such as references, acknowledgements, supplementary material, and appendices. The title, abstract, keywords, and main sections are retained because they are part of the paper text needed for screening. The same body filter is applied to text and Markdown uploads.
 
@@ -204,23 +204,39 @@ python -m pip install -e ".[ocr]"
 
 OCR also requires the Tesseract OCR executable and Poppler's PDF rendering tools. Install both for Windows and make sure `tesseract.exe` and `pdftoppm.exe` are available on `PATH`. You can configure OCR with `PAPER_ATLAS_OCR_LANG` (default `eng`) and `PAPER_ATLAS_OCR_DPI` (default `220`). If OCR is not installed, text PDFs still work; an image-only PDF returns an actionable ingestion error instead of sending webpage chrome or an empty document to the model.
 
-## What is intentionally not finished yet
+### Choosing the model provider
 
-- The model provider is still a deterministic demo model; no API key is required. The frontend now calls the Python `/analyze` endpoint, so URL/text submissions execute the backend graph.
+The default `demo` mode is deterministic and works offline. When the team has
+AWS access, set both of these values in `backend/.env`:
+
+```text
+PAPER_ATLAS_MODEL_MODE=bedrock
+PAPER_ATLAS_BEDROCK_MODEL_ID=anthropic.claude-3-5-sonnet-20241022-v2:0
+```
+
+The Bedrock adapter uses the configured local AWS profile and region, requests
+strict JSON, and validates every returned evidence excerpt against the
+ingested paper body before the workflow can complete. It supports Anthropic
+Claude and Amazon Nova request formats, with a text-completion fallback for
+legacy providers. If Bedrock mode is selected without a model ID, the app
+falls back to the local demo model so incomplete optional configuration does
+not break website analysis.
+
+## Current limitations and next steps
+
+- The default model is deterministic and requires no API key. An optional AWS Bedrock adapter is available by setting `PAPER_ATLAS_MODEL_MODE=bedrock` and `PAPER_ATLAS_BEDROCK_MODEL_ID`. The frontend calls the Python `/analyze` endpoint, so URL/text submissions execute the backend graph.
 - Paper concepts are augmented with spaCy named-entity recognition, then filtered to entities with an English Wikipedia article. The first setup downloads `en_core_web_sm`; set `PAPER_ATLAS_SPACY_MODEL` to another installed spaCy pipeline when a domain-specific model is preferred.
 - Concept recognition also extracts noun phrases and named-law/theory patterns, links them to canonical Wikipedia pages, checks Wikidata `instance of`/`subclass of` types, and exposes Wikipedia, Wikidata, DOI, university, government, and publisher references in the Concepts view. A source-backed label means the concept is documented and referenced; it is not a claim that the paper's interpretation is universally true.
 - File uploads now use a multipart `/analyze-file` endpoint for PDF, TXT, and Markdown files. This path works without internet access.
 - URL ingestion prefers a discoverable PDF and reports the effective format/source in the response trace; scanned/image-only PDFs use the optional OCR fallback described above.
-- Similarity currently uses simple token overlap; embeddings should come later.
-- Analysis runs are not persisted yet.
-- Streaming progress, citations in the UI, and human review are future steps.
+- Similarity uses weighted token overlap and explicit-language relationship cues; embeddings can be added later.
+- Completed responses are persisted locally in SQLite (by default in the operating system temporary directory) and can be retrieved with `GET /runs/{run_id}`.
+- `POST /analyze/stream` emits server-sent progress events. Responses expose lightweight quality telemetry for schema validity, citation/location coverage, retries, input size, chunk count, and latency.
+- Citation navigation in the UI and human review are future steps.
 
 ## Next implementation order
 
-1. Connect the frontend input to `POST /analyze`.
-2. Replace `DemoResearchModel` with one provider-backed implementation.
-3. Add source-location-aware extraction and citation display.
-4. Add a two-paper comparison fixture and improve relationships.
-5. Add embeddings only after the concept and relationship schema is stable.
-6. Add persistence/checkpointing and streaming progress.
-7. Measure schema pass rate, citation coverage, relevance agreement, latency, retries, and token cost.
+1. Add resumable checkpoints and citation navigation in the UI.
+2. Add a two-paper comparison fixture and improve relationships.
+3. Add embeddings only after the concept and relationship schema is stable.
+4. Measure schema pass rate, citation coverage, relevance agreement, latency, retries, and token cost.

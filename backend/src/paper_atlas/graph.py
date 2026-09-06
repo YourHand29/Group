@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import time
 from uuid import uuid4
 
 from langgraph.graph import END, START, StateGraph
@@ -23,11 +24,12 @@ from .nodes import (
 )
 from .schemas import AnalysisRequest, AnalysisResponse
 from .state import ResearchState
+from .store import safe_save_path
 
 
 def build_graph(model: ResearchModel | None = None, settings: Settings | None = None):
-    model = model or default_model()
     settings = settings or get_settings()
+    model = model or default_model(settings)
 
     builder = StateGraph(ResearchState)
     builder.add_node("validate_input", validate_input)
@@ -79,7 +81,20 @@ def response_from_state(state: ResearchState) -> AnalysisResponse:
             ocr_used=state.get("ocr_used", False),
             warnings=state.get("warnings", []) + state.get("errors", []),
             trace=state.get("trace", []),
+            usage={
+                "input_characters": len(state.get("raw_text", "")),
+                "chunk_count": len(state.get("chunks", [])),
+                "retries": state.get("retry_count", 0),
+            },
         )
+    concepts = state.get("concepts", analysis.concepts)
+    evidence = state.get("evidence", analysis.evidence)
+    quality = {
+        "schema_valid": 1.0,
+        "citation_coverage": sum(bool(concept.evidence_ids) for concept in concepts) / max(1, len(concepts)),
+        "evidence_location_coverage": sum(bool(item.source_location) for item in evidence) / max(1, len(evidence)),
+        "retry_count": float(state.get("retry_count", 0)),
+    }
     return AnalysisResponse(
         run_id=state["run_id"],
         status="completed" if state.get("status") == "completed" else "failed",
@@ -89,20 +104,68 @@ def response_from_state(state: ResearchState) -> AnalysisResponse:
         thesis=state.get("thesis", analysis.thesis),
         summary=state.get("summary", analysis.plain_language_summary),
         relevance=state.get("relevance", analysis.relevance),
-        concepts=state.get("concepts", analysis.concepts),
+        concepts=concepts,
         concept_explanations=state.get("concept_explanations", []),
-        evidence=state.get("evidence", analysis.evidence),
+        evidence=evidence,
         relationships=state.get("relationships", []),
         warnings=state.get("warnings", []) + state.get("errors", []),
         trace=state.get("trace", []),
         usage={},
+        quality=quality,
         query=state.get("query"),
         query_matches=state.get("query_matches", []),
     )
 
 
 def run_analysis(request: AnalysisRequest) -> AnalysisResponse:
+    started = time.perf_counter()
     settings = get_settings()
     graph = build_graph(settings=settings)
     result = graph.invoke(initial_state(request, settings), {"recursion_limit": 20})
-    return response_from_state(result)
+    response = response_from_state(result)
+    response.quality["latency_ms"] = round((time.perf_counter() - started) * 1000, 2)
+    response.usage.update({
+        "input_characters": len(result.get("raw_text", "")),
+        "chunk_count": len(result.get("chunks", [])),
+        "retries": result.get("retry_count", 0),
+    })
+    persistence_warning = safe_save_path(settings.run_store_path, response)
+    if persistence_warning:
+        response.warnings.append(persistence_warning)
+    return response
+
+
+def stream_analysis(request: AnalysisRequest):
+    """Yield workflow updates suitable for an SSE or websocket adapter."""
+
+    started = time.perf_counter()
+    settings = get_settings()
+    graph = build_graph(settings=settings)
+    state = initial_state(request, settings)
+    yield {"event": "progress", "node": "queued", "status": state["status"], "trace": state["trace"]}
+    for update in graph.stream(state, {"recursion_limit": 20}, stream_mode="updates"):
+        for node, values in update.items():
+            if not isinstance(values, dict):
+                continue
+            for key, value in values.items():
+                if key == "trace":
+                    state[key] = [*state.get(key, []), *value] if isinstance(value, list) else state.get(key, [])
+                else:
+                    state[key] = value
+            yield {
+                "event": "progress",
+                "node": node,
+                "status": state.get("status", "running"),
+                "trace": values.get("trace", []),
+            }
+    response = response_from_state(state)
+    response.quality["latency_ms"] = round((time.perf_counter() - started) * 1000, 2)
+    response.usage.update({
+        "input_characters": len(state.get("raw_text", "")),
+        "chunk_count": len(state.get("chunks", [])),
+        "retries": state.get("retry_count", 0),
+    })
+    persistence_warning = safe_save_path(settings.run_store_path, response)
+    if persistence_warning:
+        response.warnings.append(persistence_warning)
+    yield {"event": "complete", "status": response.status, "response": response.model_dump(mode="json")}

@@ -55,7 +55,11 @@ _ALLOWED_TYPE_IDS = {
 _ALLOWED_TYPE_LABEL = re.compile(
     r"\b(?:scientific|physical|mathematical|programming|computational)\s+"
     r"(?:law|principle|theory|model|equation|method|effect|phenomenon)\b"
-    r"|\btheorem\b|\balgorithm\b|\b(?:software|system) architecture\b|\bprotocol\b",
+    r"|\btheorem\b|\balgorithm\b|\b(?:software|system) architecture\b|\bprotocol\b"
+    r"|\b(?:dataset|benchmark|database|statistical method|measurement|metric)\b"
+    r"|\b(?:scientific instrument|technology|software|programming language)\b"
+    r"|\b(?:biological process|protein|gene|organism|chemical compound|material)\b"
+    r"|\b(?:scientist|researcher)\b",
     re.IGNORECASE,
 )
 _ALLOWED_ENTITY_LABELS = {
@@ -74,6 +78,9 @@ _ALLOWED_ENTITY_LABELS = {
 _CONCEPT_CUE_WORDS = {
     "algorithm",
     "architecture",
+    "benchmark",
+    "database",
+    "dataset",
     "effect",
     "equation",
     "framework",
@@ -83,10 +90,15 @@ _CONCEPT_CUE_WORDS = {
     "methods",
     "model",
     "models",
+    "metric",
+    "measurement",
+    "organism",
     "paradox",
     "phenomenon",
     "principle",
     "protocol",
+    "software",
+    "technology",
     "theorem",
     "theorems",
     "theory",
@@ -108,7 +120,9 @@ _CONCEPT_PATTERN = re.compile(
     r"\b(?P<term>(?:(?:[A-Za-z0-9][A-Za-z0-9'’./-]*|and|of|in|for|the)\s+){0,4}"
     r"(?:law|laws|theorem|theorems|principle|principles|theory|theories|hypothesis|hypotheses|"
     r"model|models|equation|equations|algorithm|algorithms|effect|effects|phenomenon|phenomena|"
-    r"paradox|protocol|architecture|framework|method|methods)"
+    r"paradox|protocol|architecture|framework|method|methods|dataset|datasets|benchmark|benchmarks|"
+    r"database|databases|metric|metrics|measurement|measurements|software|technology|protein|gene|"
+    r"organism|material|materials|compound|compounds)"
     r"(?:\s+(?:of|in|for|on|from|the)\s+[A-Za-z0-9][A-Za-z0-9'’./-]*(?:\s+[A-Za-z0-9][A-Za-z0-9'’./-]*){0,4})?)\b",
     re.IGNORECASE,
 )
